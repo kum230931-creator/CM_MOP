@@ -1,0 +1,6 @@
+@CMOmeets.Api_HostAddress = http://localhost:5110
+
+GET {{CMOmeets.Api_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
