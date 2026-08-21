@@ -185,26 +185,81 @@ public class MastersService
         await TransferActionPointsAsync(displaced, entity.Rid);
         return (await GetOfficersAsync()).First(o => o.Rid == entity.Rid);
     }
-
+    //previous method
+    //public async Task<bool> UpdateOfficerAsync(int id, OfficerSaveDto dto, string actor)
+    //{
+    //    var entity = await _db.TblOfficers.FindAsync(id);
+    //    if (entity is null) return false;
+    //    var depts = NormalizeDepartments(dto.DepartmentIds);
+    //    var desigs = NormalizeDesignations(dto.DesignationIds);
+    //    var displaced = await ResolvePostConflictsAsync(desigs, excludeOfficerId: id, dto.Force);
+    //    entity.DeptId = depts[0];   // primary department = first selected
+    //    entity.DesigId = await ResolvePrimaryDesignationAsync(desigs, depts[0]);
+    //    entity.OfficerName = dto.OfficerName.Trim();
+    //    entity.OfficerMobile = dto.OfficerMobile.Trim();
+    //    entity.OfficerEmail = dto.OfficerEmail.Trim();
+    //    entity.Active = ToFlag(dto.Active);
+    //    entity.UpdatedAt = DateTime.Now;
+    //    entity.UpdatedBy = actor;
+    //    await _db.SaveChangesAsync();
+    //    await SyncOfficerDepartmentsAsync(entity.Rid, depts);
+    //    await SyncOfficerDesignationsAsync(entity.Rid, desigs);
+    //    await TransferActionPointsAsync(displaced, entity.Rid);
+    //    return true;
+    //}
     public async Task<bool> UpdateOfficerAsync(int id, OfficerSaveDto dto, string actor)
     {
         var entity = await _db.TblOfficers.FindAsync(id);
         if (entity is null) return false;
+
+        // OLD values save karo
+        var oldDeptId = entity.DeptId;
+        var oldDesigId = entity.DesigId;
+
         var depts = NormalizeDepartments(dto.DepartmentIds);
         var desigs = NormalizeDesignations(dto.DesignationIds);
-        var displaced = await ResolvePostConflictsAsync(desigs, excludeOfficerId: id, dto.Force);
-        entity.DeptId = depts[0];   // primary department = first selected
-        entity.DesigId = await ResolvePrimaryDesignationAsync(desigs, depts[0]);
+
+        var displaced = await ResolvePostConflictsAsync(
+            desigs,
+            excludeOfficerId: id,
+            dto.Force);
+
+        // NEW values resolve karo
+        var newDeptId = depts[0];
+        var newDesigId = await ResolvePrimaryDesignationAsync(
+            desigs,
+            newDeptId);
+
+        // Check: Department ya Designation change hua?
+        var chargeChanged =
+            oldDeptId != newDeptId ||
+            oldDesigId != newDesigId;
+
+        // Officer update
+        entity.DeptId = newDeptId;
+        entity.DesigId = newDesigId;
         entity.OfficerName = dto.OfficerName.Trim();
         entity.OfficerMobile = dto.OfficerMobile.Trim();
         entity.OfficerEmail = dto.OfficerEmail.Trim();
         entity.Active = ToFlag(dto.Active);
         entity.UpdatedAt = DateTime.Now;
         entity.UpdatedBy = actor;
+
         await _db.SaveChangesAsync();
+
+        // Existing department/designation mappings
         await SyncOfficerDepartmentsAsync(entity.Rid, depts);
         await SyncOfficerDesignationsAsync(entity.Rid, desigs);
-        await TransferActionPointsAsync(displaced, entity.Rid);
+
+        // NEW: sirf Dept/Designation change hone par
+        if (chargeChanged)
+        {
+            await HandleOfficerChargeChangeAsync(entity.Rid);
+        }
+
+        // Agar ye purana transfer logic abhi bhi required hai
+        //await TransferActionPointsAsync(displaced, entity.Rid);
+
         return true;
     }
 
@@ -370,6 +425,118 @@ public class MastersService
             .Select(mm => mm.MeetingRid).ToListAsync();
         foreach (var mid in meetingIds.Except(already))
             _db.TbMeetingMembers.Add(new TbMeetingMember { MeetingRid = mid, MemberRid = toOfficerId, AddedAt = DateTime.Now });
+
+        await _db.SaveChangesAsync();
+    }
+    //new method create 
+    private async Task HandleOfficerChargeChangeAsync(int officerId)
+    {
+        // Officer ke active agendas find karo
+        var agendas = await _db.TbMeetingAgendas
+            .Where(a =>
+                a.Active == "Y" &&
+                a.MemberRids != null &&
+                a.MemberRids != "")
+            .ToListAsync();
+
+        // Sirf woh agendas jahan concerned officer member hai
+        var affectedAgendas = agendas
+            .Where(a => ParseRids(a.MemberRids).Contains(officerId))
+            .ToList();
+
+        if (affectedAgendas.Count == 0)
+            return;
+
+        var agendaIds = affectedAgendas
+            .Select(a => a.Rid)
+            .ToList();
+
+        // Latest remark per agenda nikalna hai.
+        // TbRemarksOnAgendas ko sirf READ karenge.
+        var remarks = await _db.TbRemarksOnAgendas
+            .Where(r => agendaIds.Contains(r.AgendaRid))
+            .OrderByDescending(r => r.Rid)
+            .ToListAsync();
+
+        var latestRemarks = remarks
+            .GroupBy(r => r.AgendaRid)
+            .ToDictionary(
+                g => g.Key,
+                g => g.First()
+            );
+
+        // Sirf incomplete agendas process honge
+        var pendingAgendas = affectedAgendas
+            .Where(a =>
+                !latestRemarks.TryGetValue(a.Rid, out var remark) ||
+                (remark.ProgressPercentage ?? 0) < 100 &&
+                !string.Equals(
+                    remark.RemarkStatus,
+                    "Completed",
+                    StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        if (pendingAgendas.Count == 0)
+            return;
+
+        var pendingMeetingIds = pendingAgendas
+            .Select(a => a.MeetingRid)
+            .Distinct()
+            .ToList();
+
+        // ---------------------------------------------------------
+        // 1. TbMeetingMembers
+        // ---------------------------------------------------------
+
+        var meetingMembers = await _db.TbMeetingMembers
+            .Where(mm =>
+                pendingMeetingIds.Contains(mm.MeetingRid) &&
+                mm.MemberRid == officerId)
+            .ToListAsync();
+
+        foreach (var member in meetingMembers)
+        {
+            member.MemberRid = 0;
+            member.DesignationId = 0;
+        }
+
+        // ---------------------------------------------------------
+        // 2. TbMeetingAgendas
+        // ---------------------------------------------------------
+
+        foreach (var agenda in pendingAgendas)
+        {
+            var remainingRids = ParseRids(agenda.MemberRids)
+                .Where(rid => rid != officerId)
+                .Distinct()
+                .ToList();
+
+            agenda.MemberRids = remainingRids.Count > 0
+                ? string.Join(",", remainingRids)
+                : null;
+
+            // Names ko corresponding remaining RIDs se rebuild karo
+            if (remainingRids.Count > 0)
+            {
+                var remainingNames = await _db.TblOfficers
+                    .Where(o => remainingRids.Contains(o.Rid))
+                    .Select(o => o.OfficerName)
+                    .ToListAsync();
+
+                agenda.AgendaMembers = string.Join(", ", remainingNames);
+            }
+            else
+            {
+                agenda.AgendaMembers = null;
+            }
+        }
+
+        // ---------------------------------------------------------
+        // 3. TbRemarksOnAgendas
+        // ---------------------------------------------------------
+        // IMPORTANT:
+        // Yahan kuch bhi UPDATE/DELETE nahi karna.
+        // Progress/history as-is rahegi.
 
         await _db.SaveChangesAsync();
     }

@@ -105,52 +105,260 @@ public class AgendasService
             a.IsOfficerCalled, a.OfficerRemark);
     }
 
-    public async Task<AgendaDto> CreateAgendaAsync(AgendaSaveDto dto, string actor, ScopeRequest? scope = null)
+    //public async Task<AgendaDto> CreateAgendaAsync(AgendaSaveDto dto, string actor, ScopeRequest? scope = null)
+    //{
+    //    // A scoped login may only create points in a meeting it is entitled to: an officer in a meeting
+    //    // involving one of its departments, a nodal in a meeting of its department; admin is unscoped.
+    //    // (Create is restricted to admin/officer/nodal at the controller.)
+    //    await EnsureScopeAccessAsync(dto.MeetingRid, await ScopeResolver.ResolveRidsAsync(_db, scope));
+    //    await ValidateDueDateAsync(dto.MeetingRid, dto.AgendaDueDt);
+    //    var (names, rids) = await BuildMemberCsvAsync(dto.MemberOfficerIds);
+    //    var entity = new TbMeetingAgenda
+    //    {
+    //        MeetingRid = dto.MeetingRid,
+    //        MeetingAgenda = dto.MeetingAgenda.Trim(),
+    //        AgendaMembers = names,
+    //        MemberRids = rids,
+    //        AgendaDueDt = dto.AgendaDueDt,
+    //        DistrictName = string.IsNullOrWhiteSpace(dto.DistrictName) ? "Headquarters" : dto.DistrictName,
+    //        AgendaStatus = "InProgress",
+    //        Active = "Y",
+    //        AddedAt = DateTime.Now,
+    //        AddedBy = actor
+    //    };
+    //    _db.TbMeetingAgendas.Add(entity);
+    //    await _db.SaveChangesAsync();
+
+    //    var contacts = await OfficerContacts.LoadAsync(_db, new[] { entity.MemberRids });
+    //    return new AgendaDto(entity.Rid, entity.MeetingRid, entity.MeetingAgenda, entity.AgendaMembers,
+    //        entity.MemberRids, entity.AgendaDueDt, entity.DistrictName,
+    //        AgendaStatusHelper.Derive(entity.AgendaStatus, entity.AgendaDueDt), 0, null, entity.AddedAt,
+    //        false, null, null, null,
+    //        OfficerContacts.Resolve(entity.MemberRids, entity.AgendaMembers, contacts),
+    //        entity.IsOfficerCalled, entity.OfficerRemark);
+    //}
+    public async Task<AgendaDto> CreateAgendaAsync(
+    AgendaSaveDto dto,
+    string actor,
+    ScopeRequest? scope = null)
     {
-        // A scoped login may only create points in a meeting it is entitled to: an officer in a meeting
-        // involving one of its departments, a nodal in a meeting of its department; admin is unscoped.
-        // (Create is restricted to admin/officer/nodal at the controller.)
-        await EnsureScopeAccessAsync(dto.MeetingRid, await ScopeResolver.ResolveRidsAsync(_db, scope));
-        await ValidateDueDateAsync(dto.MeetingRid, dto.AgendaDueDt);
-        var (names, rids) = await BuildMemberCsvAsync(dto.MemberOfficerIds);
+   
+        await EnsureScopeAccessAsync(
+            dto.MeetingRid,
+            await ScopeResolver.ResolveRidsAsync(_db, scope));
+
+        await ValidateDueDateAsync(
+            dto.MeetingRid,
+            dto.AgendaDueDt);
+
+        var (names, rids) = await BuildMemberCsvAsync(
+            dto.MemberOfficerIds);
+
+      
+
+        var officerDepartmentDesignation =
+            await _db.TbMeetingMembers
+                .Where(m =>
+                    m.MeetingRid == dto.MeetingRid &&
+                    dto.MemberOfficerIds.Contains(m.MemberRid))
+                .Select(m => new
+                {
+                    OfficerId = m.MemberRid,
+                    DepartmentId = m.DepartmentId,
+                    DesignationId = m.DesignationId
+                })
+                .Distinct()
+                .ToListAsync();
+
+
+        var departmentDesignationCsv = string.Join(
+            ",",
+            officerDepartmentDesignation
+                .Select(x =>
+                    $"{x.OfficerId}:{x.DepartmentId}:{x.DesignationId}")
+        );
+
+        // ---------------------------------------------------------
+        // 6. Create Agenda entity
+        // ---------------------------------------------------------
+
         var entity = new TbMeetingAgenda
         {
             MeetingRid = dto.MeetingRid,
+
             MeetingAgenda = dto.MeetingAgenda.Trim(),
+
             AgendaMembers = names,
+
             MemberRids = rids,
+
+            // NEW
+            // OfficerId:DepartmentId:DesignationId
+            DepartmentIDs = departmentDesignationCsv,
+
             AgendaDueDt = dto.AgendaDueDt,
-            DistrictName = string.IsNullOrWhiteSpace(dto.DistrictName) ? "Headquarters" : dto.DistrictName,
+
+            DistrictName = string.IsNullOrWhiteSpace(dto.DistrictName)
+                ? "Headquarters"
+                : dto.DistrictName,
+
             AgendaStatus = "InProgress",
+
             Active = "Y",
+
             AddedAt = DateTime.Now,
+
             AddedBy = actor
         };
+
+        // ---------------------------------------------------------
+        // 7. Save Agenda
+        // ---------------------------------------------------------
+
         _db.TbMeetingAgendas.Add(entity);
+
         await _db.SaveChangesAsync();
 
-        var contacts = await OfficerContacts.LoadAsync(_db, new[] { entity.MemberRids });
-        return new AgendaDto(entity.Rid, entity.MeetingRid, entity.MeetingAgenda, entity.AgendaMembers,
-            entity.MemberRids, entity.AgendaDueDt, entity.DistrictName,
-            AgendaStatusHelper.Derive(entity.AgendaStatus, entity.AgendaDueDt), 0, null, entity.AddedAt,
-            false, null, null, null,
-            OfficerContacts.Resolve(entity.MemberRids, entity.AgendaMembers, contacts),
-            entity.IsOfficerCalled, entity.OfficerRemark);
+        // ---------------------------------------------------------
+        // 8. Load officer contacts
+        // ---------------------------------------------------------
+
+        var contacts = await OfficerContacts.LoadAsync(
+            _db,
+            new[] { entity.MemberRids });
+
+        // ---------------------------------------------------------
+        // 9. Return Agenda DTO
+        // ---------------------------------------------------------
+
+        return new AgendaDto(
+            entity.Rid,
+            entity.MeetingRid,
+            entity.MeetingAgenda,
+            entity.AgendaMembers,
+            entity.MemberRids,
+            entity.AgendaDueDt,
+            entity.DistrictName,
+
+            AgendaStatusHelper.Derive(
+                entity.AgendaStatus,
+                entity.AgendaDueDt),
+
+            0,
+            null,
+            entity.AddedAt,
+
+            false,
+            null,
+            null,
+            null,
+
+            OfficerContacts.Resolve(
+                entity.MemberRids,
+                entity.AgendaMembers,
+                contacts),
+
+            entity.IsOfficerCalled,
+            entity.OfficerRemark
+        );
     }
-
-    public async Task<bool> UpdateAgendaAsync(long id, AgendaSaveDto dto, ScopeRequest? scope = null)
+    //public async Task<bool> UpdateAgendaAsync(long id, AgendaSaveDto dto, ScopeRequest? scope = null)
+    //{
+    //    var entity = await _db.TbMeetingAgendas.FindAsync(id);
+    //    if (entity is null) return false;
+    //    await EnsureScopeAccessAsync(entity.MeetingRid, await ScopeResolver.ResolveRidsAsync(_db, scope));
+    //    await ValidateDueDateAsync(entity.MeetingRid, dto.AgendaDueDt);
+    //    var (names, rids) = await BuildMemberCsvAsync(dto.MemberOfficerIds);
+    //    entity.MeetingAgenda = dto.MeetingAgenda.Trim();
+    //    entity.AgendaMembers = names;
+    //    entity.MemberRids = rids;
+    //    entity.AgendaDueDt = dto.AgendaDueDt;
+    //    entity.DistrictName = string.IsNullOrWhiteSpace(dto.DistrictName) ? "Headquarters" : dto.DistrictName;
+    //    await _db.SaveChangesAsync();
+    //    return true;
+    //}
+    public async Task<bool> UpdateAgendaAsync(
+    long id,
+    AgendaSaveDto dto,
+    ScopeRequest? scope = null)
     {
+        // ---------------------------------------------------------
+        // 1. Get existing agenda
+        // ---------------------------------------------------------
         var entity = await _db.TbMeetingAgendas.FindAsync(id);
-        if (entity is null) return false;
-        await EnsureScopeAccessAsync(entity.MeetingRid, await ScopeResolver.ResolveRidsAsync(_db, scope));
-        await ValidateDueDateAsync(entity.MeetingRid, dto.AgendaDueDt);
-        var (names, rids) = await BuildMemberCsvAsync(dto.MemberOfficerIds);
+
+        if (entity is null)
+            return false;
+
+        // ---------------------------------------------------------
+        // 2. Check scope access
+        // ---------------------------------------------------------
+        await EnsureScopeAccessAsync(
+            entity.MeetingRid,
+            await ScopeResolver.ResolveRidsAsync(_db, scope));
+
+        // ---------------------------------------------------------
+        // 3. Validate due date
+        // ---------------------------------------------------------
+        await ValidateDueDateAsync(
+            entity.MeetingRid,
+            dto.AgendaDueDt);
+
+        // ---------------------------------------------------------
+        // 4. Build officer names and officer RIDs
+        // ---------------------------------------------------------
+        var (names, rids) = await BuildMemberCsvAsync(
+            dto.MemberOfficerIds);
+
+        // ---------------------------------------------------------
+        // 5. Get Officer + Department + Designation mapping
+        // ---------------------------------------------------------
+        var officerDepartmentDesignation =
+            await _db.TbMeetingMembers
+                .Where(m =>
+                    m.MeetingRid == entity.MeetingRid &&
+                    dto.MemberOfficerIds.Contains(m.MemberRid))
+                .Select(m => new
+                {
+                    OfficerId = m.MemberRid,
+                    DepartmentId = m.DepartmentId,
+                    DesignationId = m.DesignationId
+                })
+                .Distinct()
+                .ToListAsync();
+
+   
+        var departmentDesignationCsv = string.Join(
+            ",",
+            officerDepartmentDesignation
+                .Select(x =>
+                    $"{x.OfficerId}:{x.DepartmentId}:{x.DesignationId}")
+        );
+
+        // ---------------------------------------------------------
+        // 7. Update agenda
+        // ---------------------------------------------------------
         entity.MeetingAgenda = dto.MeetingAgenda.Trim();
+
         entity.AgendaMembers = names;
+
         entity.MemberRids = rids;
+
+        // NEW
+        entity.DepartmentIDs = departmentDesignationCsv;
+
         entity.AgendaDueDt = dto.AgendaDueDt;
-        entity.DistrictName = string.IsNullOrWhiteSpace(dto.DistrictName) ? "Headquarters" : dto.DistrictName;
+
+        entity.DistrictName =
+            string.IsNullOrWhiteSpace(dto.DistrictName)
+                ? "Headquarters"
+                : dto.DistrictName;
+
+        // ---------------------------------------------------------
+        // 8. Save changes
+        // ---------------------------------------------------------
         await _db.SaveChangesAsync();
+
         return true;
     }
 

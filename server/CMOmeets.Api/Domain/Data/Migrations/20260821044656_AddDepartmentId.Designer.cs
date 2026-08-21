@@ -4,6 +4,7 @@ using CMOmeets.Domain.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -11,9 +12,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace CMOmeets.Domain.Data.Migrations
 {
     [DbContext(typeof(CmoMeetsDbContext))]
-    partial class CmoMeetsDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260821044656_AddDepartmentId")]
+    partial class AddDepartmentId
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -425,9 +428,6 @@ namespace CMOmeets.Domain.Data.Migrations
                         .HasColumnType("varchar(50)")
                         .HasDefaultValue("InProgress")
                         .HasColumnName("agendaStatus");
-
-                    b.Property<string>("DepartmentIDs")
-                        .HasColumnType("nvarchar(max)");
 
                     b.Property<string>("DistrictName")
                         .IsRequired()

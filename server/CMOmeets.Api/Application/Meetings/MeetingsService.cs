@@ -411,18 +411,47 @@ public class MeetingsService
     //    return (await GetMeetingsAsync(true)).First(x => x.Rid == entity.Rid);
     //}
 
-    public async Task<bool> UpdateMeetingAsync(int id, MeetingSaveDto dto)
+    //public async Task<bool> UpdateMeetingAsync(int id, MeetingSaveDto dto)
+    //{
+    //    var entity = await _db.TbMeetingSchedules.FindAsync(id);
+    //    if (entity is null) return false;
+
+    //    entity.MeetingDate = dto.MeetingDate;
+    //    entity.MeetingPlace = dto.MeetingPlace.Trim();
+    //    entity.MeetingSubject = dto.MeetingSubject;
+    //    if (dto.MeetingDocument is not null) entity.MeetingDocument = dto.MeetingDocument;
+
+    //    await SyncMembersAsync(entity.Rid, dto.SelectedOfficers);
+    //    await _db.SaveChangesAsync();
+    //    return true;
+    //}
+    public async Task<bool> UpdateMeetingAsync(
+    int id,
+    MeetingSaveDto dto)
     {
         var entity = await _db.TbMeetingSchedules.FindAsync(id);
-        if (entity is null) return false;
 
+        if (entity is null)
+            return false;
+
+        // Update meeting details
         entity.MeetingDate = dto.MeetingDate;
-        entity.MeetingPlace = dto.MeetingPlace.Trim();
-        entity.MeetingSubject = dto.MeetingSubject;
-        if (dto.MeetingDocument is not null) entity.MeetingDocument = dto.MeetingDocument;
 
-        await SyncMembersAsync(entity.Rid, dto.SelectedOfficers);
+        entity.MeetingPlace = dto.MeetingPlace.Trim();
+
+        entity.MeetingSubject = dto.MeetingSubject;
+
+        if (dto.MeetingDocument is not null)
+        {
+            entity.MeetingDocument = dto.MeetingDocument;
+        }
+
+        await SyncMembersAsync(
+            entity.Rid,
+            dto.SelectedOfficers);
+
         await _db.SaveChangesAsync();
+
         return true;
     }
 
@@ -512,6 +541,41 @@ public class MeetingsService
             .AnyAsync(o => o.OfficerDepartments.Any(x => x.Active == "Y")
                 ? o.OfficerDepartments.Any(x => x.Active == "Y" && x.DeptId == deptId)
                 : o.DeptId == deptId);
+    private async Task SyncMembersAsync(
+    int meetingId,
+    List<SelectedOfficerDto> selectedOfficers)
+    {
+        // Get existing members for this meeting
+        var existing = await _db.TbMeetingMembers
+            .Where(m => m.MeetingRid == meetingId)
+            .ToListAsync();
+
+        // Remove existing members
+        _db.TbMeetingMembers.RemoveRange(existing);
+
+        // Add selected officers
+        foreach (var officer in selectedOfficers
+            .Where(x => x.DesignationId != 0)
+            .DistinctBy(x => new
+            {
+                x.OfficerId,
+                x.DesignationId,
+                x.DepartmentId
+            }))
+        {
+            _db.TbMeetingMembers.Add(new TbMeetingMember
+            {
+                MeetingRid = meetingId,
+                MemberRid = officer.OfficerId,
+                DesignationId = officer.DesignationId,
+
+                // NEW: Department ID save
+                DepartmentId = officer.DepartmentId,
+
+                AddedAt = DateTime.Now
+            });
+        }
+    }
 
     //private async Task SyncMembersAsync(int meetingId, List<SelectedOfficerDto> selectedOfficers)
     //{
@@ -520,37 +584,37 @@ public class MeetingsService
     //    foreach (var oid in officerIds.Distinct())
     //        _db.TbMeetingMembers.Add(new TbMeetingMember { MeetingRid = meetingId, MemberRid = oid, AddedAt = DateTime.Now });
     //}
-    private async Task SyncMembersAsync(
-    int meetingId,
-    List<SelectedOfficerDto> selectedOfficers)
-    {
-        var existing = await _db.TbMeetingMembers
-            .Where(m => m.MeetingRid == meetingId)
-            .ToListAsync();
+    //private async Task SyncMembersAsync(
+    //int meetingId,
+    //List<SelectedOfficerDto> selectedOfficers)
+    //{
+    //    var existing = await _db.TbMeetingMembers
+    //        .Where(m => m.MeetingRid == meetingId)
+    //        .ToListAsync();
 
-        _db.TbMeetingMembers.RemoveRange(existing);
+    //    _db.TbMeetingMembers.RemoveRange(existing);
 
-        //foreach (var officer in selectedOfficers.DistinctBy(x => x.OfficerId))
-        //{
-        //    _db.TbMeetingMembers.Add(new TbMeetingMember
-        //    {
-        //        MeetingRid = meetingId,
-        //        MemberRid = officer.OfficerId,
-        //        DesignationId = officer.DesignationId,
-        //        AddedAt = DateTime.Now
-        //    });
-        //}
-        foreach (var officer in selectedOfficers.Where(x => x.DesignationId != 0).DistinctBy(x => new { x.OfficerId, x.DesignationId }))
-        {
-            _db.TbMeetingMembers.Add(new TbMeetingMember
-            {
-                MeetingRid = meetingId,
-                MemberRid = officer.OfficerId,
-                DesignationId = officer.DesignationId,
-                AddedAt = DateTime.Now
-            });
-        }
-    }
+    //foreach (var officer in selectedOfficers.DistinctBy(x => x.OfficerId))
+    //{
+    //    _db.TbMeetingMembers.Add(new TbMeetingMember
+    //    {
+    //        MeetingRid = meetingId,
+    //        MemberRid = officer.OfficerId,
+    //        DesignationId = officer.DesignationId,
+    //        AddedAt = DateTime.Now
+    //    });
+    //}
+    //    foreach (var officer in selectedOfficers.Where(x => x.DesignationId != 0).DistinctBy(x => new { x.OfficerId, x.DesignationId }))
+    //    {
+    //        _db.TbMeetingMembers.Add(new TbMeetingMember
+    //        {
+    //            MeetingRid = meetingId,
+    //            MemberRid = officer.OfficerId,
+    //            DesignationId = officer.DesignationId,
+    //            AddedAt = DateTime.Now
+    //        });
+    //    }
+    //}
 
     private static IEnumerable<int> ParseRids(string? csv)
     {

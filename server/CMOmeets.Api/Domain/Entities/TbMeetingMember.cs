@@ -12,6 +12,7 @@ public partial class TbMeetingMember
 
     public DateTime? AddedAt { get; set; }
     public int DesignationId { get; set; }
+    public int DepartmentId { get; set; }
 
     public virtual TbMeetingSchedule MeetingR { get; set; } = null!;
 

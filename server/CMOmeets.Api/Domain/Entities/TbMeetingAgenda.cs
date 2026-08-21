@@ -14,6 +14,7 @@ public partial class TbMeetingAgenda
     public string? AgendaMembers { get; set; }
 
     public string? MemberRids { get; set; }
+    public string? DepartmentIDs { get; set; }
 
     public DateOnly? AgendaDueDt { get; set; }
 
