@@ -17,4 +17,5 @@ public partial class TbMeetingMember
     public virtual TbMeetingSchedule MeetingR { get; set; } = null!;
 
     public virtual TblOfficer MemberR { get; set; } = null!;
+    //public bool IsHidden { get; set; }
 }

@@ -447,12 +447,9 @@ public class MastersService
         if (affectedAgendas.Count == 0)
             return;
 
-        var agendaIds = affectedAgendas
-            .Select(a => a.Rid)
-            .ToList();
+        var agendaIds = affectedAgendas.Select(a => a.Rid).ToList();
 
-        // Latest remark per agenda nikalna hai.
-        // TbRemarksOnAgendas ko sirf READ karenge.
+        // Latest remark per agenda
         var remarks = await _db.TbRemarksOnAgendas
             .Where(r => agendaIds.Contains(r.AgendaRid))
             .OrderByDescending(r => r.Rid)
@@ -460,20 +457,14 @@ public class MastersService
 
         var latestRemarks = remarks
             .GroupBy(r => r.AgendaRid)
-            .ToDictionary(
-                g => g.Key,
-                g => g.First()
-            );
+            .ToDictionary(g => g.Key, g => g.First());
 
-        // Sirf incomplete agendas process honge
+        // Sirf incomplete/pending agendas process honge
         var pendingAgendas = affectedAgendas
             .Where(a =>
                 !latestRemarks.TryGetValue(a.Rid, out var remark) ||
-                (remark.ProgressPercentage ?? 0) < 100 &&
-                !string.Equals(
-                    remark.RemarkStatus,
-                    "Completed",
-                    StringComparison.OrdinalIgnoreCase))
+                ((remark.ProgressPercentage ?? 0) < 100 &&
+                 !string.Equals(remark.RemarkStatus, "Completed", StringComparison.OrdinalIgnoreCase)))
             .ToList();
 
         if (pendingAgendas.Count == 0)
@@ -485,25 +476,24 @@ public class MastersService
             .ToList();
 
         // ---------------------------------------------------------
-        // 1. TbMeetingMembers
+        // 1. TbMeetingMembers — unconditional clear (yeh case simple rakhna hai)
         // ---------------------------------------------------------
-
         var meetingMembers = await _db.TbMeetingMembers
             .Where(mm =>
-                pendingMeetingIds.Contains(mm.MeetingRid) &&
-                mm.MemberRid == officerId)
+                mm.MemberRid == officerId &&
+                pendingMeetingIds.Contains(mm.MeetingRid))
             .ToListAsync();
 
         foreach (var member in meetingMembers)
         {
             member.MemberRid = 0;
             member.DesignationId = 0;
+            // DepartmentId SAME rahega
         }
 
         // ---------------------------------------------------------
-        // 2. TbMeetingAgendas
+        // 2. TbMeetingAgendas — officer ka rid hatao, names rebuild karo
         // ---------------------------------------------------------
-
         foreach (var agenda in pendingAgendas)
         {
             var remainingRids = ParseRids(agenda.MemberRids)
@@ -515,7 +505,6 @@ public class MastersService
                 ? string.Join(",", remainingRids)
                 : null;
 
-            // Names ko corresponding remaining RIDs se rebuild karo
             if (remainingRids.Count > 0)
             {
                 var remainingNames = await _db.TblOfficers
@@ -532,14 +521,123 @@ public class MastersService
         }
 
         // ---------------------------------------------------------
-        // 3. TbRemarksOnAgendas
+        // 3. TbRemarksOnAgendas — kuch touch nahi karna, history as-is
         // ---------------------------------------------------------
-        // IMPORTANT:
-        // Yahan kuch bhi UPDATE/DELETE nahi karna.
-        // Progress/history as-is rahegi.
 
         await _db.SaveChangesAsync();
     }
+    //private async Task HandleOfficerChargeChangeAsync(int officerId)
+    //{
+    //    // Officer ke active agendas find karo
+    //    var agendas = await _db.TbMeetingAgendas
+    //        .Where(a =>
+    //            a.Active == "Y" &&
+    //            a.MemberRids != null &&
+    //            a.MemberRids != "")
+    //        .ToListAsync();
+
+    //    // Sirf woh agendas jahan concerned officer member hai
+    //    var affectedAgendas = agendas
+    //        .Where(a => ParseRids(a.MemberRids).Contains(officerId))
+    //        .ToList();
+
+    //    if (affectedAgendas.Count == 0)
+    //        return;
+
+    //    var agendaIds = affectedAgendas
+    //        .Select(a => a.Rid)
+    //        .ToList();
+
+    //    // Latest remark per agenda nikalna hai.
+    //    // TbRemarksOnAgendas ko sirf READ karenge.
+    //    var remarks = await _db.TbRemarksOnAgendas
+    //        .Where(r => agendaIds.Contains(r.AgendaRid))
+    //        .OrderByDescending(r => r.Rid)
+    //        .ToListAsync();
+
+    //    var latestRemarks = remarks
+    //        .GroupBy(r => r.AgendaRid)
+    //        .ToDictionary(
+    //            g => g.Key,
+    //            g => g.First()
+    //        );
+
+    //    // Sirf incomplete agendas process honge
+    //    var pendingAgendas = affectedAgendas
+    //        .Where(a =>
+    //            !latestRemarks.TryGetValue(a.Rid, out var remark) ||
+    //            (remark.ProgressPercentage ?? 0) < 100 &&
+    //            !string.Equals(
+    //                remark.RemarkStatus,
+    //                "Completed",
+    //                StringComparison.OrdinalIgnoreCase))
+    //        .ToList();
+
+    //    if (pendingAgendas.Count == 0)
+    //        return;
+
+    //    var pendingMeetingIds = pendingAgendas
+    //        .Select(a => a.MeetingRid)
+    //        .Distinct()
+    //        .ToList();
+
+    //    // ---------------------------------------------------------
+    //    // 1. TbMeetingMembers
+    //    // ---------------------------------------------------------
+
+    //    var meetingMembers = await _db.TbMeetingMembers
+    //        .Where(mm =>
+    //            pendingMeetingIds.Contains(mm.MeetingRid) &&
+    //            mm.MemberRid == officerId)
+    //        .ToListAsync();
+
+    //    foreach (var member in meetingMembers)
+    //    {
+    //        member.MemberRid = 0;
+    //        member.DesignationId = 0;
+    //    }
+
+    //    // ---------------------------------------------------------
+    //    // 2. TbMeetingAgendas
+    //    // ---------------------------------------------------------
+
+    //    foreach (var agenda in pendingAgendas)
+    //    {
+    //        var remainingRids = ParseRids(agenda.MemberRids)
+    //            .Where(rid => rid != officerId)
+    //            .Distinct()
+    //            .ToList();
+
+    //        agenda.MemberRids = remainingRids.Count > 0
+    //            ? string.Join(",", remainingRids)
+    //            : null;
+
+    //        // Names ko corresponding remaining RIDs se rebuild karo
+    //        if (remainingRids.Count > 0)
+    //        {
+    //            var remainingNames = await _db.TblOfficers
+    //                .Where(o => remainingRids.Contains(o.Rid))
+    //                .Select(o => o.OfficerName)
+    //                .ToListAsync();
+
+    //            agenda.AgendaMembers = string.Join(", ", remainingNames);
+    //        }
+    //        else
+    //        {
+    //            agenda.AgendaMembers = null;
+    //        }
+    //    }
+
+    //    // ---------------------------------------------------------
+    //    // 3. TbRemarksOnAgendas
+    //    // ---------------------------------------------------------
+    //    // IMPORTANT:
+    //    // Yahan kuch bhi UPDATE/DELETE nahi karna.
+    //    // Progress/history as-is rahegi.
+
+    //    await _db.SaveChangesAsync();
+    //}
+
 
     private static IEnumerable<int> ParseRids(string? csv)
     {
