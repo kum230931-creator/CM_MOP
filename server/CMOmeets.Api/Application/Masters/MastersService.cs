@@ -140,29 +140,46 @@ public class MastersService
     // ---------- Officers ----------
     // An officer is listed under any department it serves (its primary DeptId or designation id).
     public async Task<List<OfficerDto>> GetOfficersAsync(int? deptId = null) =>
-        await _db.TblOfficers
-           .Where(o =>
-            o.DesigId != null &&
-            (
-                deptId == null ||
-                o.DeptId == deptId ||
-                o.OfficerDepartments.Any(x =>
-                    x.DeptId == deptId && x.Active == "Y")
-            ))
-            .OrderBy(o => o.Dept.DepartmentName).ThenBy(o => o.Desig!.SeqNo)
-            .Select(o => new OfficerDto(o.Rid, o.DeptId, o.Dept.DepartmentName, o.DesigId, o.Desig!.DesigName,
-                o.OfficerName, o.OfficerMobile, o.OfficerEmail, o.Active == "Y",
-                o.OfficerDepartments.Where(x => x.Active == "Y")
-                    .Select(x => new LookupDto(x.DeptId, x.Dept.DepartmentName)).ToList(),
-                o.OfficerDesignations.Where(x => x.Active == "Y")
-                    .OrderBy(x => x.Desig.SeqNo)
-                    .Select(x => new LookupDto(x.DesigId, x.Desig.DesigName)).ToList()))
-            .ToListAsync();
+    await _db.TblOfficers
+       .Where(o =>
+        o.Active == "Y" &&
+        (
+            deptId == null ||
+            o.DeptId == deptId ||
+            o.OfficerDepartments.Any(x =>
+                x.DeptId == deptId && x.Active == "Y")
+        ))
+        .OrderBy(o => o.Dept.DepartmentName)
+        .ThenBy(o => o.Desig != null ? o.Desig.SeqNo : int.MaxValue)
+        .Select(o => new OfficerDto(
+            o.Rid,
+            o.DeptId,
+            o.Dept.DepartmentName,
+            o.DesigId,
+            o.Desig != null ? o.Desig.DesigName : null,   // ✅ string? — null theek hai
+            o.OfficerName,
+            o.OfficerMobile,
+            o.OfficerEmail,
+            o.Active == "Y",
+            o.OfficerDepartments.Where(x => x.Active == "Y")
+                .Select(x => new LookupDto(x.DeptId, x.Dept.DepartmentName)).ToList(),
+            o.OfficerDesignations.Where(x => x.Active == "Y")
+                .OrderBy(x => x.Desig.SeqNo)
+                .Select(x => new LookupDto(x.DesigId, x.Desig.DesigName)).ToList()))
+        .ToListAsync();
     //create officer and also possible insert the values in mapping table 
     public async Task<OfficerDto?> CreateOfficerAsync(OfficerSaveDto dto, string actor)
     {
         var depts = NormalizeDepartments(dto.DepartmentIds);
         var desigs = NormalizeDesignations(dto.DesignationIds);
+        var validDeptIds = await _db.MasDeptDesignations
+    .Where(x => desigs.Contains(x.Rid))
+    .Select(x => x.DeptId)
+    .Distinct()
+    .ToListAsync();
+
+        if (validDeptIds.Except(depts).Any())
+            throw new InvalidOperationException("Selected designation(s) don't belong to the selected department(s).");
         // A post belongs to one officer: if any picked post is already held, either 409 (unconfirmed)
         // or free it from its current holder (confirmed reassign).
         var displaced = await ResolvePostConflictsAsync(desigs, excludeOfficerId: 0, dto.Force);
@@ -212,30 +229,24 @@ public class MastersService
         var entity = await _db.TblOfficers.FindAsync(id);
         if (entity is null) return false;
 
-        // OLD values save karo
         var oldDeptId = entity.DeptId;
         var oldDesigId = entity.DesigId;
+
+        var oldDesigIds = await _db.TblOfficerDesignations
+            .Where(x => x.OfficerId == id && x.Active == "Y")
+            .Select(x => x.DesigId)
+            .ToListAsync();
 
         var depts = NormalizeDepartments(dto.DepartmentIds);
         var desigs = NormalizeDesignations(dto.DesignationIds);
 
-        var displaced = await ResolvePostConflictsAsync(
-            desigs,
-            excludeOfficerId: id,
-            dto.Force);
-
-        // NEW values resolve karo
+        var displaced = await ResolvePostConflictsAsync(desigs, excludeOfficerId: 0, dto.Force);
         var newDeptId = depts[0];
-        var newDesigId = await ResolvePrimaryDesignationAsync(
-            desigs,
-            newDeptId);
+        var newDesigId = await ResolvePrimaryDesignationAsync(desigs, newDeptId);
 
-        // Check: Department ya Designation change hua?
-        var chargeChanged =
-            oldDeptId != newDeptId ||
-            oldDesigId != newDesigId;
+        var removedDesigIds = oldDesigIds.Except(desigs).ToList();
+        var chargeChanged = removedDesigIds.Count > 0 || oldDeptId != newDeptId || oldDesigId != newDesigId;
 
-        // Officer update
         entity.DeptId = newDeptId;
         entity.DesigId = newDesigId;
         entity.OfficerName = dto.OfficerName.Trim();
@@ -247,22 +258,111 @@ public class MastersService
 
         await _db.SaveChangesAsync();
 
-        // Existing department/designation mappings
         await SyncOfficerDepartmentsAsync(entity.Rid, depts);
         await SyncOfficerDesignationsAsync(entity.Rid, desigs);
 
-        // NEW: sirf Dept/Designation change hone par
         if (chargeChanged)
         {
-            await HandleOfficerChargeChangeAsync(entity.Rid);
+            await HandleOfficerChargeChangeAsync(entity.Rid, removedDesigIds);
         }
-
-        // Agar ye purana transfer logic abhi bhi required hai
-        //await TransferActionPointsAsync(displaced, entity.Rid);
 
         return true;
     }
+    private async Task HandleOfficerChargeChangeAsync(int officerId, List<int> removedDesigIds)
+    {
+        if (removedDesigIds.Count == 0) return;
 
+        var agendas = await _db.TbMeetingAgendas
+            .Where(a => a.Active == "Y" && a.DepartmentIDs != null && a.DepartmentIDs != "")
+            .ToListAsync();
+
+        // Sirf woh agendas jahan officer ki EXACT removed designation wali triple maujood hai
+        var affectedAgendas = agendas
+            .Where(a => ParseChargeTriples(a.DepartmentIDs)
+                .Any(t => t.OfficerRid == officerId && removedDesigIds.Contains(t.DesigId)))
+            .ToList();
+
+        if (affectedAgendas.Count == 0) return;
+
+        var agendaIds = affectedAgendas.Select(a => a.Rid).ToList();
+
+        var remarks = await _db.TbRemarksOnAgendas
+            .Where(r => agendaIds.Contains(r.AgendaRid))
+            .OrderByDescending(r => r.Rid)
+            .ToListAsync();
+
+        var latestRemarks = remarks
+            .GroupBy(r => r.AgendaRid)
+            .ToDictionary(g => g.Key, g => g.First());
+
+        var pendingAgendas = affectedAgendas
+            .Where(a =>
+                !latestRemarks.TryGetValue(a.Rid, out var remark) ||
+                ((remark.ProgressPercentage ?? 0) < 100 &&
+                 !string.Equals(remark.RemarkStatus, "Completed", StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+
+        if (pendingAgendas.Count == 0) return;
+
+        var pendingMeetingIds = pendingAgendas.Select(a => a.MeetingRid).Distinct().ToList();
+
+        // ---------------------------------------------------------
+        // 1. TbMeetingMembers — sirf removed designation wali row clear (already precise, DesignationId column se)
+        // ---------------------------------------------------------
+        var meetingMembers = await _db.TbMeetingMembers
+            .Where(mm =>
+                mm.MemberRid == officerId &&
+                pendingMeetingIds.Contains(mm.MeetingRid) &&
+                removedDesigIds.Contains(mm.DesignationId))
+            .ToListAsync();
+
+        foreach (var member in meetingMembers)
+        {
+            member.MemberRid = 0;
+            member.DesignationId = 0;
+            // DepartmentId same rahega
+        }
+
+        // ---------------------------------------------------------
+        // 2. TbMeetingAgendas — DepartmentIDs se sirf officer+removedDesig wali triple(s) hatao,
+        //    officer ki baaki (abhi bhi valid) designation ki triple UNTOUCHED rahegi
+        // ---------------------------------------------------------
+        foreach (var agenda in pendingAgendas)
+        {
+            var triples = ParseChargeTriples(agenda.DepartmentIDs);
+
+            var remainingTriples = triples
+                .Where(t => !(t.OfficerRid == officerId && removedDesigIds.Contains(t.DesigId)))
+                .ToList();
+
+            if (remainingTriples.Count == triples.Count)
+                continue; // safety: is agenda me kuch remove hua hi nahi
+
+            agenda.DepartmentIDs = remainingTriples.Count > 0 ? BuildChargeCsv(remainingTriples) : null;
+
+            // memberRIDs / agendaMembers ko remaining triples ke DISTINCT officer rids se rebuild karo
+            var remainingOfficerRids = remainingTriples.Select(t => t.OfficerRid).Distinct().ToList();
+
+            agenda.MemberRids = remainingOfficerRids.Count > 0
+                ? string.Join(",", remainingOfficerRids)
+                : null;
+
+            if (remainingOfficerRids.Count > 0)
+            {
+                var remainingNames = await _db.TblOfficers
+                    .Where(o => remainingOfficerRids.Contains(o.Rid))
+                    .Select(o => o.OfficerName)
+                    .ToListAsync();
+                agenda.AgendaMembers = string.Join(", ", remainingNames);
+            }
+            else
+            {
+                agenda.AgendaMembers = null;
+            }
+        }
+
+        await _db.SaveChangesAsync();
+    }
     // An officer must serve at least one department; the first is treated as the primary.
     private static List<int> NormalizeDepartments(IEnumerable<int>? deptIds)
     {
@@ -271,6 +371,28 @@ public class MastersService
             throw new InvalidOperationException("Select at least one department.");
         return list;
     }
+    // "officerRid:deptId:desigId" triples ko parse karta hai new method fot tbl_agenda
+    private static List<(int OfficerRid, int DeptId, int DesigId)> ParseChargeTriples(string? csv)
+    {
+        var result = new List<(int, int, int)>();
+        if (string.IsNullOrWhiteSpace(csv)) return result;
+
+        foreach (var part in csv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var pieces = part.Split(':', StringSplitOptions.TrimEntries);
+            if (pieces.Length == 3 &&
+                int.TryParse(pieces[0], out var officerRid) &&
+                int.TryParse(pieces[1], out var deptId) &&
+                int.TryParse(pieces[2], out var desigId))
+            {
+                result.Add((officerRid, deptId, desigId));
+            }
+        }
+        return result;
+    }
+
+    private static string BuildChargeCsv(IEnumerable<(int OfficerRid, int DeptId, int DesigId)> triples) =>
+        string.Join(",", triples.Select(t => $"{t.OfficerRid}:{t.DeptId}:{t.DesigId}"));
 
     // An officer must hold at least one designation (one per department they serve).
     private static List<int> NormalizeDesignations(IEnumerable<int>? desigIds)
@@ -336,30 +458,21 @@ public class MastersService
             .Distinct()
             .ToListAsync();
 
-    // Enforce one-officer-per-post: if any picked post is already held, throw (→ 409) unless the caller
-    // confirmed (Force), in which case free those posts from their current holders first. Returns the
-    // officers that lost a post, so their action points can follow the post to its new holder.
-    private async Task<List<int>> ResolvePostConflictsAsync(List<int> desigIds, int excludeOfficerId, bool force)
-    {
-        var conflicts = await DetectDesignationConflictsAsync(desigIds, excludeOfficerId);
-        if (conflicts.Count == 0) return new List<int>();
-        if (!force) throw new DesignationConflictException(conflicts);
-        return await ReleaseDesignationsAsync(desigIds, excludeOfficerId);
-    }
-
-    // Remove the given posts from every OTHER active officer that currently holds them, repairing each
-    // former holder's primary post (falls to another of their posts, or null = no post but still active).
-    // Returns the officers that were displaced.
-    private async Task<List<int>> ReleaseDesignationsAsync(List<int> desigIds, int excludeOfficerId)
+    
+    private async Task<List<(int OfficerId, int DesigId)>> ReleaseDesignationsAsync(List<int> desigIds, int excludeOfficerId)
     {
         var rows = await _db.TblOfficerDesignations
             .Where(x => x.Active == "Y" && desigIds.Contains(x.DesigId) && x.OfficerId != excludeOfficerId)
             .ToListAsync();
-        if (rows.Count == 0) return new List<int>();
-        var affected = rows.Select(r => r.OfficerId).Distinct().ToList();
+        if (rows.Count == 0) return new List<(int, int)>();
+
+        var displacedPairs = rows.Select(r => (r.OfficerId, r.DesigId)).ToList();
+
         _db.TblOfficerDesignations.RemoveRange(rows);
         await _db.SaveChangesAsync();
-        foreach (var oid in affected)
+
+        var affectedOfficerIds = displacedPairs.Select(p => p.OfficerId).Distinct().ToList();
+        foreach (var oid in affectedOfficerIds)
         {
             var officer = await _db.TblOfficers.FindAsync(oid);
             if (officer is null || officer.DesigId is not int primary || !desigIds.Contains(primary)) continue;
@@ -368,7 +481,15 @@ public class MastersService
             officer.DesigId = remaining.Count > 0 ? remaining[0] : (int?)null;
         }
         await _db.SaveChangesAsync();
-        return affected;
+        return displacedPairs;
+    }
+
+    private async Task<List<(int OfficerId, int DesigId)>> ResolvePostConflictsAsync(List<int> desigIds, int excludeOfficerId, bool force)
+    {
+        var conflicts = await DetectDesignationConflictsAsync(desigIds, excludeOfficerId);
+        if (conflicts.Count == 0) return new List<(int, int)>();
+        if (!force) throw new DesignationConflictException(conflicts);
+        return await ReleaseDesignationsAsync(desigIds, excludeOfficerId);
     }
 
     // A post carries its work: when an officer is transferred out and another takes their post, every
@@ -377,266 +498,116 @@ public class MastersService
     //
     // Deliberately NOT rewritten: the ATRs already filed (tb_remarksOnAgendas keeps the reporting
     // officer's rid and name) — those are the historical record of who actually did the work.
-    private async Task TransferActionPointsAsync(IReadOnlyCollection<int> fromOfficerIds, int toOfficerId)
-    {
-        var from = fromOfficerIds.Where(id => id != toOfficerId).ToHashSet();
-        if (from.Count == 0) return;
-
-        // Points name officers as a CSV of rids, so the match has to be made on parsed values —
-        // a substring test would let rid 8 match "8174".
-        var candidates = await _db.TbMeetingAgendas
-            .Where(a => a.Active == "Y" && a.MemberRids != null && a.MemberRids != "")
-            .Select(a => new { a.Rid, a.MemberRids })
-            .ToListAsync();
-        var affectedIds = candidates
-            .Where(a => ParseRids(a.MemberRids).Any(from.Contains))
-            .Select(a => a.Rid)
-            .ToList();
-        if (affectedIds.Count == 0) return;
-
-        var points = await _db.TbMeetingAgendas.Where(a => affectedIds.Contains(a.Rid)).ToListAsync();
-
-        // AgendaMembers is a display snapshot of the names, so it has to be rebuilt alongside the rids.
-        var newRids = points.SelectMany(p => ParseRids(p.MemberRids))
-            .Select(r => from.Contains(r) ? toOfficerId : r).Distinct().ToList();
-        var names = (await _db.TblOfficers.Where(o => newRids.Contains(o.Rid))
-                .Select(o => new { o.Rid, o.OfficerName }).ToListAsync())
-            .ToDictionary(o => o.Rid, o => o.OfficerName);
-
-        foreach (var p in points)
-        {
-            var mapped = new List<int>();
-            foreach (var rid in ParseRids(p.MemberRids))
-            {
-                // The new holder may already be named on the point — keep one entry, not two.
-                var target = from.Contains(rid) ? toOfficerId : rid;
-                if (!mapped.Contains(target)) mapped.Add(target);
-            }
-            p.MemberRids = string.Join(",", mapped);
-            p.AgendaMembers = string.Join(", ", mapped.Where(names.ContainsKey).Select(id => names[id]));
-        }
-
-        // The "Responsible Officer" list on a point is drawn from the meeting's members, so the new
-        // holder has to be one — otherwise the point they just inherited has no valid owner on screen.
-        // The former holder stays a member: their attendance at that meeting is a matter of record.
-        var meetingIds = points.Select(p => p.MeetingRid).Distinct().ToList();
-        var already = await _db.TbMeetingMembers
-            .Where(mm => meetingIds.Contains(mm.MeetingRid) && mm.MemberRid == toOfficerId)
-            .Select(mm => mm.MeetingRid).ToListAsync();
-        foreach (var mid in meetingIds.Except(already))
-            _db.TbMeetingMembers.Add(new TbMeetingMember { MeetingRid = mid, MemberRid = toOfficerId, AddedAt = DateTime.Now });
-
-        await _db.SaveChangesAsync();
-    }
-    //new method create 
-    private async Task HandleOfficerChargeChangeAsync(int officerId)
-    {
-        // Officer ke active agendas find karo
-        var agendas = await _db.TbMeetingAgendas
-            .Where(a =>
-                a.Active == "Y" &&
-                a.MemberRids != null &&
-                a.MemberRids != "")
-            .ToListAsync();
-
-        // Sirf woh agendas jahan concerned officer member hai
-        var affectedAgendas = agendas
-            .Where(a => ParseRids(a.MemberRids).Contains(officerId))
-            .ToList();
-
-        if (affectedAgendas.Count == 0)
-            return;
-
-        var agendaIds = affectedAgendas.Select(a => a.Rid).ToList();
-
-        // Latest remark per agenda
-        var remarks = await _db.TbRemarksOnAgendas
-            .Where(r => agendaIds.Contains(r.AgendaRid))
-            .OrderByDescending(r => r.Rid)
-            .ToListAsync();
-
-        var latestRemarks = remarks
-            .GroupBy(r => r.AgendaRid)
-            .ToDictionary(g => g.Key, g => g.First());
-
-        // Sirf incomplete/pending agendas process honge
-        var pendingAgendas = affectedAgendas
-            .Where(a =>
-                !latestRemarks.TryGetValue(a.Rid, out var remark) ||
-                ((remark.ProgressPercentage ?? 0) < 100 &&
-                 !string.Equals(remark.RemarkStatus, "Completed", StringComparison.OrdinalIgnoreCase)))
-            .ToList();
-
-        if (pendingAgendas.Count == 0)
-            return;
-
-        var pendingMeetingIds = pendingAgendas
-            .Select(a => a.MeetingRid)
-            .Distinct()
-            .ToList();
-
-        // ---------------------------------------------------------
-        // 1. TbMeetingMembers — unconditional clear (yeh case simple rakhna hai)
-        // ---------------------------------------------------------
-        var meetingMembers = await _db.TbMeetingMembers
-            .Where(mm =>
-                mm.MemberRid == officerId &&
-                pendingMeetingIds.Contains(mm.MeetingRid))
-            .ToListAsync();
-
-        foreach (var member in meetingMembers)
-        {
-            member.MemberRid = 0;
-            member.DesignationId = 0;
-            // DepartmentId SAME rahega
-        }
-
-        // ---------------------------------------------------------
-        // 2. TbMeetingAgendas — officer ka rid hatao, names rebuild karo
-        // ---------------------------------------------------------
-        foreach (var agenda in pendingAgendas)
-        {
-            var remainingRids = ParseRids(agenda.MemberRids)
-                .Where(rid => rid != officerId)
-                .Distinct()
-                .ToList();
-
-            agenda.MemberRids = remainingRids.Count > 0
-                ? string.Join(",", remainingRids)
-                : null;
-
-            if (remainingRids.Count > 0)
-            {
-                var remainingNames = await _db.TblOfficers
-                    .Where(o => remainingRids.Contains(o.Rid))
-                    .Select(o => o.OfficerName)
-                    .ToListAsync();
-
-                agenda.AgendaMembers = string.Join(", ", remainingNames);
-            }
-            else
-            {
-                agenda.AgendaMembers = null;
-            }
-        }
-
-        // ---------------------------------------------------------
-        // 3. TbRemarksOnAgendas — kuch touch nahi karna, history as-is
-        // ---------------------------------------------------------
-
-        await _db.SaveChangesAsync();
-    }
-    //private async Task HandleOfficerChargeChangeAsync(int officerId)
+    //private async Task TransferActionPointsAsync(IReadOnlyCollection<int> fromOfficerIds, int toOfficerId)
     //{
-    //    // Officer ke active agendas find karo
-    //    var agendas = await _db.TbMeetingAgendas
-    //        .Where(a =>
-    //            a.Active == "Y" &&
-    //            a.MemberRids != null &&
-    //            a.MemberRids != "")
+    //    var from = fromOfficerIds.Where(id => id != toOfficerId).ToHashSet();
+    //    if (from.Count == 0) return;
+
+    //    // Points name officers as a CSV of rids, so the match has to be made on parsed values —
+    //    // a substring test would let rid 8 match "8174".
+    //    var candidates = await _db.TbMeetingAgendas
+    //        .Where(a => a.Active == "Y" && a.MemberRids != null && a.MemberRids != "")
+    //        .Select(a => new { a.Rid, a.MemberRids })
     //        .ToListAsync();
-
-    //    // Sirf woh agendas jahan concerned officer member hai
-    //    var affectedAgendas = agendas
-    //        .Where(a => ParseRids(a.MemberRids).Contains(officerId))
-    //        .ToList();
-
-    //    if (affectedAgendas.Count == 0)
-    //        return;
-
-    //    var agendaIds = affectedAgendas
+    //    var affectedIds = candidates
+    //        .Where(a => ParseRids(a.MemberRids).Any(from.Contains))
     //        .Select(a => a.Rid)
     //        .ToList();
+    //    if (affectedIds.Count == 0) return;
 
-    //    // Latest remark per agenda nikalna hai.
-    //    // TbRemarksOnAgendas ko sirf READ karenge.
-    //    var remarks = await _db.TbRemarksOnAgendas
-    //        .Where(r => agendaIds.Contains(r.AgendaRid))
-    //        .OrderByDescending(r => r.Rid)
-    //        .ToListAsync();
+    //    var points = await _db.TbMeetingAgendas.Where(a => affectedIds.Contains(a.Rid)).ToListAsync();
 
-    //    var latestRemarks = remarks
-    //        .GroupBy(r => r.AgendaRid)
-    //        .ToDictionary(
-    //            g => g.Key,
-    //            g => g.First()
-    //        );
+    //    // AgendaMembers is a display snapshot of the names, so it has to be rebuilt alongside the rids.
+    //    var newRids = points.SelectMany(p => ParseRids(p.MemberRids))
+    //        .Select(r => from.Contains(r) ? toOfficerId : r).Distinct().ToList();
+    //    var names = (await _db.TblOfficers.Where(o => newRids.Contains(o.Rid))
+    //            .Select(o => new { o.Rid, o.OfficerName }).ToListAsync())
+    //        .ToDictionary(o => o.Rid, o => o.OfficerName);
 
-    //    // Sirf incomplete agendas process honge
-    //    var pendingAgendas = affectedAgendas
-    //        .Where(a =>
-    //            !latestRemarks.TryGetValue(a.Rid, out var remark) ||
-    //            (remark.ProgressPercentage ?? 0) < 100 &&
-    //            !string.Equals(
-    //                remark.RemarkStatus,
-    //                "Completed",
-    //                StringComparison.OrdinalIgnoreCase))
-    //        .ToList();
-
-    //    if (pendingAgendas.Count == 0)
-    //        return;
-
-    //    var pendingMeetingIds = pendingAgendas
-    //        .Select(a => a.MeetingRid)
-    //        .Distinct()
-    //        .ToList();
-
-    //    // ---------------------------------------------------------
-    //    // 1. TbMeetingMembers
-    //    // ---------------------------------------------------------
-
-    //    var meetingMembers = await _db.TbMeetingMembers
-    //        .Where(mm =>
-    //            pendingMeetingIds.Contains(mm.MeetingRid) &&
-    //            mm.MemberRid == officerId)
-    //        .ToListAsync();
-
-    //    foreach (var member in meetingMembers)
+    //    foreach (var p in points)
     //    {
-    //        member.MemberRid = 0;
-    //        member.DesignationId = 0;
+    //        var mapped = new List<int>();
+    //        foreach (var rid in ParseRids(p.MemberRids))
+    //        {
+    //            // The new holder may already be named on the point — keep one entry, not two.
+    //            var target = from.Contains(rid) ? toOfficerId : rid;
+    //            if (!mapped.Contains(target)) mapped.Add(target);
+    //        }
+    //        p.MemberRids = string.Join(",", mapped);
+    //        p.AgendaMembers = string.Join(", ", mapped.Where(names.ContainsKey).Select(id => names[id]));
     //    }
 
-    //    // ---------------------------------------------------------
-    //    // 2. TbMeetingAgendas
-    //    // ---------------------------------------------------------
-
-    //    foreach (var agenda in pendingAgendas)
-    //    {
-    //        var remainingRids = ParseRids(agenda.MemberRids)
-    //            .Where(rid => rid != officerId)
-    //            .Distinct()
-    //            .ToList();
-
-    //        agenda.MemberRids = remainingRids.Count > 0
-    //            ? string.Join(",", remainingRids)
-    //            : null;
-
-    //        // Names ko corresponding remaining RIDs se rebuild karo
-    //        if (remainingRids.Count > 0)
-    //        {
-    //            var remainingNames = await _db.TblOfficers
-    //                .Where(o => remainingRids.Contains(o.Rid))
-    //                .Select(o => o.OfficerName)
-    //                .ToListAsync();
-
-    //            agenda.AgendaMembers = string.Join(", ", remainingNames);
-    //        }
-    //        else
-    //        {
-    //            agenda.AgendaMembers = null;
-    //        }
-    //    }
-
-    //    // ---------------------------------------------------------
-    //    // 3. TbRemarksOnAgendas
-    //    // ---------------------------------------------------------
-    //    // IMPORTANT:
-    //    // Yahan kuch bhi UPDATE/DELETE nahi karna.
-    //    // Progress/history as-is rahegi.
+    //    // The "Responsible Officer" list on a point is drawn from the meeting's members, so the new
+    //    // holder has to be one — otherwise the point they just inherited has no valid owner on screen.
+    //    // The former holder stays a member: their attendance at that meeting is a matter of record.
+    //    var meetingIds = points.Select(p => p.MeetingRid).Distinct().ToList();
+    //    var already = await _db.TbMeetingMembers
+    //        .Where(mm => meetingIds.Contains(mm.MeetingRid) && mm.MemberRid == toOfficerId)
+    //        .Select(mm => mm.MeetingRid).ToListAsync();
+    //    foreach (var mid in meetingIds.Except(already))
+    //        _db.TbMeetingMembers.Add(new TbMeetingMember { MeetingRid = mid, MemberRid = toOfficerId, AddedAt = DateTime.Now });
 
     //    await _db.SaveChangesAsync();
     //}
+    //new method create 
+    private async Task TransferActionPointsAsync(List<(int OfficerId, int DesigId)> displacedPairs, int toOfficerId)
+    {
+        var pairs = displacedPairs.Where(p => p.OfficerId != toOfficerId).ToList();
+        if (pairs.Count == 0) return;
+
+        var agendas = await _db.TbMeetingAgendas
+            .Where(a => a.Active == "Y" && a.DepartmentIDs != null && a.DepartmentIDs != "")
+            .ToListAsync();
+
+        var affectedAgendas = agendas
+            .Where(a => ParseChargeTriples(a.DepartmentIDs)
+                .Any(t => pairs.Any(p => p.OfficerId == t.OfficerRid && p.DesigId == t.DesigId)))
+            .ToList();
+
+        if (affectedAgendas.Count == 0) return;
+
+        foreach (var agenda in affectedAgendas)
+        {
+            var triples = ParseChargeTriples(agenda.DepartmentIDs);
+
+            // sirf woh triple(s) update hongi jinka (officer, desig) displaced list me match karta hai
+            var updatedTriples = triples
+                .Select(t => pairs.Any(p => p.OfficerId == t.OfficerRid && p.DesigId == t.DesigId)
+                    ? (OfficerRid: toOfficerId, t.DeptId, t.DesigId)   // sirf rid badla, dept/desig same
+                    : t)
+                .ToList();
+
+            agenda.DepartmentIDs = BuildChargeCsv(updatedTriples);
+
+            var distinctOfficerRids = updatedTriples.Select(t => t.OfficerRid).Distinct().ToList();
+            agenda.MemberRids = string.Join(",", distinctOfficerRids);
+
+            var names = await _db.TblOfficers
+                .Where(o => distinctOfficerRids.Contains(o.Rid))
+                .Select(o => new { o.Rid, o.OfficerName })
+                .ToListAsync();
+            agenda.AgendaMembers = string.Join(", ",
+                distinctOfficerRids.Where(id => names.Any(n => n.Rid == id))
+                                    .Select(id => names.First(n => n.Rid == id).OfficerName));
+        }
+
+        // TbMeetingMembers — sirf displaced (officer, desig) wali row ka MemberRid naye officer ko do,
+        // baaki rows (uski dusri designations) touch hi nahi hongi
+        var pendingMeetingIds = affectedAgendas.Select(a => a.MeetingRid).Distinct().ToList();
+        foreach (var (oldOfficerId, desigId) in pairs)
+        {
+            var rows = await _db.TbMeetingMembers
+                .Where(mm => mm.MemberRid == oldOfficerId &&
+                             mm.DesignationId == desigId &&
+                             pendingMeetingIds.Contains(mm.MeetingRid))
+                .ToListAsync();
+
+            foreach (var row in rows)
+                row.MemberRid = toOfficerId;   // DesignationId/DepartmentId same rahega
+        }
+
+        await _db.SaveChangesAsync();
+    }
 
 
     private static IEnumerable<int> ParseRids(string? csv)
