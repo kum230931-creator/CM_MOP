@@ -265,31 +265,53 @@ public class MeetingsService
             return null;
 
         var memberRows = await (
-        from mm in _db.TbMeetingMembers
-        join o in _db.TblOfficers on mm.MemberRid equals o.Rid
-        where mm.MeetingRid == id
-           && o.Active == "Y"
-        orderby o.Dept.DepartmentName, o.Desig!.SeqNo
-        select new
-        {
-            o.Rid,
-            o.OfficerName,
+    from mm in _db.TbMeetingMembers
+    join o in _db.TblOfficers on mm.MemberRid equals o.Rid
+    where mm.MeetingRid == id
+       && o.Active == "Y"
+       && (
+            o.OfficerDesignations.Any(x =>
+                x.Active == "Y" &&
+                x.DesigId == mm.DesignationId &&
+                x.Desig != null &&
+                x.Desig.DesigName != null &&
+                x.Desig.DesigName != ""
+            )
+            ||
+            (
+                o.DesigId != null &&
+                o.Desig != null &&
+                o.Desig.DesigName != null &&
+                o.Desig.DesigName != ""
+            )
+       )
+    orderby o.Dept.DepartmentName, o.Desig!.SeqNo
+    select new
+    {
+        o.Rid,
+        o.OfficerName,
 
-            LegacyDeptId = o.DeptId,
-            LegacyDept = o.Dept.DepartmentName,
-            LegacyDesigId = o.DesigId,
-            LegacyDesig = o.Desig!.DesigName,
+        LegacyDeptId = o.DeptId,
+        LegacyDept = o.Dept.DepartmentName,
+        LegacyDesigId = o.DesigId,
+        LegacyDesig = o.Desig!.DesigName,
 
-            Posts = o.OfficerDesignations
-                .Where(x => x.Active == "Y" && x.DesigId == mm.DesignationId)
-                .Select(x => new MemberPostDto(
-                    x.Desig.DeptId,
-                    x.Desig.Dept.DepartmentName,
-                    x.DesigId,
-                    x.Desig.DesigName))
-                .ToList()
-        }
-    ).ToListAsync();
+        Posts = o.OfficerDesignations
+            .Where(x =>
+                x.Active == "Y" &&
+                x.DesigId == mm.DesignationId &&
+                x.Desig != null &&
+                x.Desig.DesigName != null &&
+                x.Desig.DesigName != ""
+            )
+            .Select(x => new MemberPostDto(
+                x.Desig.DeptId,
+                x.Desig.Dept.DepartmentName,
+                x.DesigId,
+                x.Desig.DesigName))
+            .ToList()
+    }
+).ToListAsync();
 
         //Edited
         //        Posts = o.OfficerDesignations
