@@ -134,7 +134,15 @@ public class DesignationsController(MastersService svc) : ApiControllerBase
 [Route("api/officers")]
 public class OfficersController(MastersService svc) : ApiControllerBase
 {
-    [HttpGet] public async Task<IActionResult> Get([FromQuery] int? deptId) => Ok(await svc.GetOfficersAsync(deptId));
+    [HttpGet]
+    public async Task<IActionResult> GetOfficers(
+    [FromQuery] int? deptId,
+    [FromQuery] bool onlyAssigned = false)   
+    {
+        var officers = await svc.GetOfficersAsync(deptId, onlyAssigned);  
+        return Ok(officers);
+    }
+    //public async Task<IActionResult> Get([FromQuery] int? deptId) => Ok(await svc.GetOfficersAsync(deptId));
 
     [HttpPost]
     [Authorize(Roles = "admin")]

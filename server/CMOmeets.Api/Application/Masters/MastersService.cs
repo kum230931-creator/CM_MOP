@@ -136,37 +136,90 @@ public class MastersService
         await _db.SaveChangesAsync();
         return true;
     }
+    public async Task<List<OfficerDto>> GetOfficersAsync(
+    int? deptId = null,
+    bool onlyAssigned = false)
+    {
+        var query = _db.TblOfficers
+            .Where(o => o.Active == "Y");
 
+        // List 2: sirf woh officers jinki primary designation assign hai
+        // (DeptId primary table me kabhi null nahi hota, sirf DesigId null ho sakta hai)
+        if (onlyAssigned)
+        {
+            query = query.Where(o => o.DesigId != null);
+        }
+
+        // Department filter (primary dept ya mapping table dept, dono me match)
+        if (deptId != null)
+        {
+            query = query.Where(o =>
+                o.DeptId == deptId ||
+                o.OfficerDepartments.Any(x =>
+                    x.DeptId == deptId &&
+                    x.Active == "Y"));
+        }
+
+        return await query
+            .AsNoTracking()
+            .OrderBy(o => o.Dept.DepartmentName)
+            .ThenBy(o => o.Desig != null ? o.Desig.SeqNo : int.MaxValue)
+            .ThenBy(o => o.OfficerName)
+            .Select(o => new OfficerDto(
+                o.Rid,
+                o.DeptId,
+                o.Dept.DepartmentName,
+                o.DesigId,
+                o.Desig != null ? o.Desig.DesigName : null,
+                o.OfficerName,
+                o.OfficerMobile,
+                o.OfficerEmail,
+                o.Active == "Y",
+                o.OfficerDepartments
+                    .Where(x => x.Active == "Y")
+                    .Select(x => new LookupDto(
+                        x.DeptId,
+                        x.Dept.DepartmentName))
+                    .ToList(),
+                o.OfficerDesignations
+                    .Where(x => x.Active == "Y")
+                    .OrderBy(x => x.Desig.SeqNo)
+                    .Select(x => new LookupDto(
+                        x.DesigId,
+                        x.Desig.DesigName))
+                    .ToList()))
+            .ToListAsync();
+    }
     // ---------- Officers ----------
     // An officer is listed under any department it serves (its primary DeptId or designation id).
-    public async Task<List<OfficerDto>> GetOfficersAsync(int? deptId = null) =>
-    await _db.TblOfficers
-       .Where(o =>
-        o.Active == "Y" &&
-        (
-            deptId == null ||
-            o.DeptId == deptId ||
-            o.OfficerDepartments.Any(x =>
-                x.DeptId == deptId && x.Active == "Y")
-        ))
-        .OrderBy(o => o.Dept.DepartmentName)
-        .ThenBy(o => o.Desig != null ? o.Desig.SeqNo : int.MaxValue)
-        .Select(o => new OfficerDto(
-            o.Rid,
-            o.DeptId,
-            o.Dept.DepartmentName,
-            o.DesigId,
-            o.Desig != null ? o.Desig.DesigName : null,   // ✅ string? — null theek hai
-            o.OfficerName,
-            o.OfficerMobile,
-            o.OfficerEmail,
-            o.Active == "Y",
-            o.OfficerDepartments.Where(x => x.Active == "Y")
-                .Select(x => new LookupDto(x.DeptId, x.Dept.DepartmentName)).ToList(),
-            o.OfficerDesignations.Where(x => x.Active == "Y")
-                .OrderBy(x => x.Desig.SeqNo)
-                .Select(x => new LookupDto(x.DesigId, x.Desig.DesigName)).ToList()))
-        .ToListAsync();
+    //public async Task<List<OfficerDto>> GetOfficersAsync(int? deptId = null) =>
+    //await _db.TblOfficers
+    //   .Where(o =>
+    //    o.Active == "Y" &&
+    //    (
+    //        deptId == null ||
+    //        o.DeptId == deptId ||
+    //        o.OfficerDepartments.Any(x =>
+    //            x.DeptId == deptId && x.Active == "Y")
+    //    ))
+    //    .OrderBy(o => o.Dept.DepartmentName)
+    //    .ThenBy(o => o.Desig != null ? o.Desig.SeqNo : int.MaxValue)
+    //    .Select(o => new OfficerDto(
+    //        o.Rid,
+    //        o.DeptId,
+    //        o.Dept.DepartmentName,
+    //        o.DesigId,
+    //        o.Desig != null ? o.Desig.DesigName : null,   // ✅ string? — null theek hai
+    //        o.OfficerName,
+    //        o.OfficerMobile,
+    //        o.OfficerEmail,
+    //        o.Active == "Y",
+    //        o.OfficerDepartments.Where(x => x.Active == "Y")
+    //            .Select(x => new LookupDto(x.DeptId, x.Dept.DepartmentName)).ToList(),
+    //        o.OfficerDesignations.Where(x => x.Active == "Y")
+    //            .OrderBy(x => x.Desig.SeqNo)
+    //            .Select(x => new LookupDto(x.DesigId, x.Desig.DesigName)).ToList()))
+    //    .ToListAsync();
 
     private async Task ClearOfficerRemovedDesignationAsync(
     int officerId,

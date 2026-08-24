@@ -312,14 +312,6 @@ public class MeetingsService
             .ToList()
     }
 ).ToListAsync();
-
-        //Edited
-        //        Posts = o.OfficerDesignations
-        //            .Where(x => x.Active == "Y")
-        //            .Select(x => new MemberPostDto(x.Desig.DeptId, x.Desig.Dept.DepartmentName, x.DesigId, x.Desig.DesigName))
-        //            .ToList()
-
-
         var members = memberRows.Select(r =>
         {
             // Officers predating the junction tables have no post rows — fall back to the legacy
