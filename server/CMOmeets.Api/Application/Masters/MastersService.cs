@@ -167,6 +167,33 @@ public class MastersService
                 .OrderBy(x => x.Desig.SeqNo)
                 .Select(x => new LookupDto(x.DesigId, x.Desig.DesigName)).ToList()))
         .ToListAsync();
+
+    private async Task ClearOfficerRemovedDesignationAsync(
+    int officerId,
+    List<int> removedDesigIds)
+    {
+        if (removedDesigIds == null || removedDesigIds.Count == 0)
+            return;
+
+        var meetingMembers = await _db.TbMeetingMembers
+            .Where(mm =>
+                mm.MemberRid == officerId &&
+                removedDesigIds.Contains(mm.DesignationId))
+            .ToListAsync();
+
+        if (meetingMembers.Count == 0)
+            return;
+
+        foreach (var member in meetingMembers)
+        {
+            member.MemberRid = 0;
+            member.DesignationId = 0;
+
+            // DepartmentId ko change nahi karna
+        }
+
+        await _db.SaveChangesAsync();
+    }
     //create officer and also possible insert the values in mapping table 
     public async Task<OfficerDto?> CreateOfficerAsync(OfficerSaveDto dto, string actor)
     {
@@ -261,9 +288,11 @@ public class MastersService
         await SyncOfficerDepartmentsAsync(entity.Rid, depts);
         await SyncOfficerDesignationsAsync(entity.Rid, desigs);
 
-        if (chargeChanged)
+        if (removedDesigIds.Count > 0)
         {
-            await HandleOfficerChargeChangeAsync(entity.Rid, removedDesigIds);
+            await ClearOfficerRemovedDesignationAsync(
+                entity.Rid,
+                removedDesigIds);
         }
 
         return true;
