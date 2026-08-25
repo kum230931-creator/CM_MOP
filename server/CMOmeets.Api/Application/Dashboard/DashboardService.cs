@@ -14,29 +14,94 @@ public class DashboardService
     private record AgendaRow(long Rid, int MeetingRid, string? MeetingSubject, DateTime MeetingDate,
         string MeetingAgenda, string? AgendaMembers, string? MemberRids, string DistrictName, DateOnly? AgendaDueDt, string AgendaStatus);
 
-    private async Task<List<AgendaRow>> LoadAsync(long? groupId, ScopeRequest? scope)
+    //private async Task<List<AgendaRow>> LoadAsync(long? groupId, ScopeRequest? scope)
+    //{
+    //    var scopeRids = await ScopeResolver.ResolveRidsAsync(_db, scope);
+    //    var query =
+    //        from a in _db.TbMeetingAgendas
+    //        join m in _db.TbMeetingSchedules on a.MeetingRid equals m.Rid
+    //        where a.Active == "Y" && m.Active == "Y"
+    //        select new AgendaRow(a.Rid, a.MeetingRid, m.MeetingSubject, m.MeetingDate,
+    //            a.MeetingAgenda, a.AgendaMembers, a.MemberRids, a.DistrictName, a.AgendaDueDt, a.AgendaStatus);
+
+    //    if (groupId is not null)
+    //    {
+    //        var meetingIds = await _db.TbMeetingMappedGroups
+    //            .Where(g => g.GroupRid == groupId && g.Active == "Y")
+    //            .Select(g => g.MeetingRid).ToListAsync();
+    //        query = query.Where(r => meetingIds.Contains(r.MeetingRid));
+    //    }
+
+    //    var rows = await query.ToListAsync();
+
+    //    // A scoped login (department or officer) only counts action points involving its own officer(s).
+    //    if (scopeRids is not null)
+    //        rows = rows.Where(r => ParseRids(r.MemberRids).Any(scopeRids.Contains)).ToList();
+    //    return rows;
+    //}
+    private async Task<List<AgendaRow>> LoadAsync(
+    long? groupId,
+    ScopeRequest? scope)
     {
         var scopeRids = await ScopeResolver.ResolveRidsAsync(_db, scope);
+
+        // NORMAL OFFICER:
+        // Only the logged-in officer's own RID should be considered.
+        // Nodal / CMO behavior remains unchanged.
+        if (scope?.IsOfficer == true &&
+            scope.OfficerLoginId is int officerId)
+        {
+            scopeRids = new List<int> { officerId };
+        }
+
         var query =
             from a in _db.TbMeetingAgendas
-            join m in _db.TbMeetingSchedules on a.MeetingRid equals m.Rid
+            join m in _db.TbMeetingSchedules
+                on a.MeetingRid equals m.Rid
             where a.Active == "Y" && m.Active == "Y"
-            select new AgendaRow(a.Rid, a.MeetingRid, m.MeetingSubject, m.MeetingDate,
-                a.MeetingAgenda, a.AgendaMembers, a.MemberRids, a.DistrictName, a.AgendaDueDt, a.AgendaStatus);
+            select new AgendaRow(
+                a.Rid,
+                a.MeetingRid,
+                m.MeetingSubject,
+                m.MeetingDate,
+                a.MeetingAgenda,
+                a.AgendaMembers,
+                a.MemberRids,
+                a.DistrictName,
+                a.AgendaDueDt,
+                a.AgendaStatus);
 
         if (groupId is not null)
         {
             var meetingIds = await _db.TbMeetingMappedGroups
-                .Where(g => g.GroupRid == groupId && g.Active == "Y")
-                .Select(g => g.MeetingRid).ToListAsync();
-            query = query.Where(r => meetingIds.Contains(r.MeetingRid));
+                .Where(g =>
+                    g.GroupRid == groupId &&
+                    g.Active == "Y")
+                .Select(g => g.MeetingRid)
+                .ToListAsync();
+
+            query = query.Where(
+                r => meetingIds.Contains(r.MeetingRid));
         }
 
         var rows = await query.ToListAsync();
 
-        // A scoped login (department or officer) only counts action points involving its own officer(s).
+        // A scoped login counts action points involving its scoped officer(s).
+        //
+        // Normal officer:
+        //     only his/her own RID
+        //
+        // Nodal / CMO:
+        //     existing department-based RIDs
         if (scopeRids is not null)
-            rows = rows.Where(r => ParseRids(r.MemberRids).Any(scopeRids.Contains)).ToList();
+        {
+            rows = rows
+                .Where(r =>
+                    ParseRids(r.MemberRids)
+                        .Any(scopeRids.Contains))
+                .ToList();
+        }
+
         return rows;
     }
 
@@ -62,19 +127,60 @@ public class DashboardService
 
     // Count active meetings. A meeting is counted even before it has any action points;
     // for a department login only meetings that include one of its officers are counted.
-    private async Task<int> CountMeetingsAsync(long? groupId, ScopeRequest? scope)
+    //private async Task<int> CountMeetingsAsync(long? groupId, ScopeRequest? scope)
+    //{
+    //    var scopeRids = await ScopeResolver.ResolveRidsAsync(_db, scope);
+    //    var query = _db.TbMeetingSchedules.Where(m => m.Active == "Y");
+    //    if (groupId is not null)
+    //    {
+    //        var meetingIds = await _db.TbMeetingMappedGroups
+    //            .Where(g => g.GroupRid == groupId && g.Active == "Y")
+    //            .Select(g => g.MeetingRid).ToListAsync();
+    //        query = query.Where(m => meetingIds.Contains(m.Rid));
+    //    }
+    //    if (scopeRids is not null)
+    //        query = query.Where(m => _db.TbMeetingMembers.Any(mm => mm.MeetingRid == m.Rid && scopeRids.Contains(mm.MemberRid)));
+    //    return await query.CountAsync();
+    //}
+    private async Task<int> CountMeetingsAsync(
+    long? groupId,
+    ScopeRequest? scope)
     {
         var scopeRids = await ScopeResolver.ResolveRidsAsync(_db, scope);
-        var query = _db.TbMeetingSchedules.Where(m => m.Active == "Y");
+
+        // NORMAL OFFICER:
+        // Only count meetings belonging to the logged-in officer.
+        // Nodal / CMO behavior remains unchanged.
+        if (scope?.IsOfficer == true &&
+            scope.OfficerLoginId is int officerId)
+        {
+            scopeRids = new List<int> { officerId };
+        }
+
+        var query = _db.TbMeetingSchedules
+            .Where(m => m.Active == "Y");
+
         if (groupId is not null)
         {
             var meetingIds = await _db.TbMeetingMappedGroups
-                .Where(g => g.GroupRid == groupId && g.Active == "Y")
-                .Select(g => g.MeetingRid).ToListAsync();
-            query = query.Where(m => meetingIds.Contains(m.Rid));
+                .Where(g =>
+                    g.GroupRid == groupId &&
+                    g.Active == "Y")
+                .Select(g => g.MeetingRid)
+                .ToListAsync();
+
+            query = query.Where(
+                m => meetingIds.Contains(m.Rid));
         }
+
         if (scopeRids is not null)
-            query = query.Where(m => _db.TbMeetingMembers.Any(mm => mm.MeetingRid == m.Rid && scopeRids.Contains(mm.MemberRid)));
+        {
+            query = query.Where(m =>
+                _db.TbMeetingMembers.Any(mm =>
+                    mm.MeetingRid == m.Rid &&
+                    scopeRids.Contains(mm.MemberRid)));
+        }
+
         return await query.CountAsync();
     }
 

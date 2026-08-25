@@ -16,19 +16,31 @@ public class MeetingsService
         bool includeInactive = false,
         ScopeRequest? scope = null)
     {
+        // Resolve the normal scope first.
         var scopeRids = await ScopeResolver.ResolveRidsAsync(_db, scope);
+
+        // IMPORTANT:
+        // Normal officer should see ONLY his/her own meetings.
+        // Nodal / CMO should continue using the existing department-based scope.
+        if (scope?.IsOfficer == true && scope.OfficerLoginId is int officerId)
+        {
+            scopeRids = new List<int> { officerId };
+        }
 
         var query = _db.TbMeetingSchedules.AsQueryable();
 
         if (!includeInactive)
             query = query.Where(m => m.Active == "Y");
 
+        // Restrict meetings according to scope.
         if (scopeRids is not null)
         {
             query = query.Where(m =>
                 _db.TbMeetingMembers.Any(mm =>
                     mm.MeetingRid == m.Rid &&
-                    scopeRids.Contains(mm.MemberRid)));
+                    scopeRids.Contains(mm.MemberRid) &&
+                    mm.MemberRid != 0 &&
+                    mm.DesignationId != 0));
         }
 
         var meetings = await query
@@ -39,21 +51,30 @@ public class MeetingsService
                 m.MeetingDate,
                 m.MeetingPlace,
                 m.MeetingSubject,
-                HasDoc = m.MeetingDocument != null && m.MeetingDocument != "",
+                HasDoc = m.MeetingDocument != null &&
+                         m.MeetingDocument != "",
                 IsActive = m.Active == "Y"
             })
             .ToListAsync();
 
-        var ids = meetings.Select(m => m.Rid).ToList();
+        var ids = meetings
+            .Select(m => m.Rid)
+            .ToList();
 
-        // Only ACTIVE officers are considered as meeting members.
-        // Inactive officers' old TbMeetingMembers rows remain in DB,
-        // but they are excluded from member count and meeting data.
+        if (ids.Count == 0)
+            return new List<MeetingListDto>();
+
+        // Only valid meeting-member assignments are considered.
+        //
+        // MemberRid = 0 OR DesignationId = 0 means the member is no longer
+        // validly assigned to the meeting.
         var members = await (
             from mm in _db.TbMeetingMembers
             join o in _db.TblOfficers
                 on mm.MemberRid equals o.Rid
             where ids.Contains(mm.MeetingRid)
+                  && mm.MemberRid != 0
+                  && mm.DesignationId != 0
                   && o.Active == "Y"
             select new
             {
@@ -80,8 +101,7 @@ public class MeetingsService
             })
             .ToListAsync();
 
-        // A scoped login (department or officer) counts only its own
-        // active members and action points per meeting.
+        // A scoped login counts only its own active members and action points.
         if (scopeRids is not null)
         {
             members = members
@@ -101,19 +121,20 @@ public class MeetingsService
                 g => g.Key,
                 g => g.Count());
 
-        // Classify every point with the app-wide status signal (PointEvaluator).
+        // Classify every point with the app-wide status signal.
         var todayD = DateOnly.FromDateTime(DateTime.Today);
         var todayNum = todayD.DayNumber;
 
         var evalMap = await PointEvaluator.EvaluateManyAsync(
             _db,
-            agendas.Select(a =>
-                new AgendaHeader(
-                    a.Rid,
-                    a.MemberRids,
-                    a.AgendaDueDt,
-                    a.AgendaStatus))
-            .ToList(),
+            agendas
+                .Select(a =>
+                    new AgendaHeader(
+                        a.Rid,
+                        a.MemberRids,
+                        a.AgendaDueDt,
+                        a.AgendaStatus))
+                .ToList(),
             todayD);
 
         var classified = agendas
@@ -232,7 +253,7 @@ public class MeetingsService
                     m.MeetingSubject,
                     m.HasDoc,
 
-                    // Count only ACTIVE officers.
+                    // Count only valid/active officers.
                     memberCounts.GetValueOrDefault(m.Rid),
 
                     total,
@@ -403,42 +424,6 @@ public class MeetingsService
         return (await GetMeetingsAsync(true))
             .First(x => x.Rid == entity.Rid);
     }
-
-    //public async Task<MeetingListDto> CreateMeetingAsync(MeetingSaveDto dto, string actor)
-    //{
-    //    var entity = new TbMeetingSchedule
-    //    {
-    //        MeetingDate = dto.MeetingDate,
-    //        MeetingPlace = dto.MeetingPlace.Trim(),
-    //        MeetingSubject = dto.MeetingSubject,
-    //        MeetingDocument = dto.MeetingDocument,
-    //        Active = "Y",
-    //        AddedAt = DateTime.Now,
-    //        AddedBy = actor
-    //    };
-    //    _db.TbMeetingSchedules.Add(entity);
-    //    await _db.SaveChangesAsync();
-
-    //    await SyncMembersAsync(entity.Rid, dto.SelectedOfficers);
-    //    await _db.SaveChangesAsync();
-
-    //    return (await GetMeetingsAsync(true)).First(x => x.Rid == entity.Rid);
-    //}
-
-    //public async Task<bool> UpdateMeetingAsync(int id, MeetingSaveDto dto)
-    //{
-    //    var entity = await _db.TbMeetingSchedules.FindAsync(id);
-    //    if (entity is null) return false;
-
-    //    entity.MeetingDate = dto.MeetingDate;
-    //    entity.MeetingPlace = dto.MeetingPlace.Trim();
-    //    entity.MeetingSubject = dto.MeetingSubject;
-    //    if (dto.MeetingDocument is not null) entity.MeetingDocument = dto.MeetingDocument;
-
-    //    await SyncMembersAsync(entity.Rid, dto.SelectedOfficers);
-    //    await _db.SaveChangesAsync();
-    //    return true;
-    //}
     public async Task<bool> UpdateMeetingAsync(
     int id,
     MeetingSaveDto dto)
@@ -485,39 +470,65 @@ public class MeetingsService
         var rids = await ScopeResolver.ResolveRidsAsync(_db, scope);
         return await GetPendingMinutesMeetingsAsync(rids ?? new List<int>());
     }
-
-    // Meetings involving the given member officers — a single officer (officer login) or a whole
-    // department's officers (nodal login) — that are not yet complete: still missing an action point for
-    // any of them, OR the minutes document. Drives the "Pending Upload Minutes" screen + nav blink.
-    public async Task<List<PendingMinuteDto>> GetPendingMinutesMeetingsAsync(IReadOnlyCollection<int> memberRids)
+    public async Task<List<PendingMinuteDto>> GetPendingMinutesMeetingsAsync(
+    IReadOnlyCollection<int> memberRids)
     {
-        if (memberRids.Count == 0) return new List<PendingMinuteDto>();
+        if (memberRids.Count == 0)
+            return new List<PendingMinuteDto>();
+
         var idList = memberRids as List<int> ?? memberRids.ToList();
 
+        // Normal officer:
+        // Only meetings where the officer is currently assigned as a member
+        // with a valid designation. Transferred/unassigned records
+        // (MemberRid = 0 or DesignationId = 0) are ignored.
         var meetingIds = await _db.TbMeetingMembers
-            .Where(mm => idList.Contains(mm.MemberRid))
-            .Select(mm => mm.MeetingRid).Distinct().ToListAsync();
-        if (meetingIds.Count == 0) return new List<PendingMinuteDto>();
-
-        // Meetings that already have an active action point naming one of these officers (their rid in
-        // MemberRids). MemberRids is a CSV, so the rid-in-list check is done in memory via ParseRids.
-        var agendaRids = await _db.TbMeetingAgendas
-            .Where(a => a.Active == "Y" && meetingIds.Contains(a.MeetingRid))
-            .Select(a => new { a.MeetingRid, a.MemberRids })
+            .Where(mm =>
+                idList.Contains(mm.MemberRid) &&
+                mm.MemberRid != 0 &&
+                mm.DesignationId != 0)
+            .Select(mm => mm.MeetingRid)
+            .Distinct()
             .ToListAsync();
+
+        if (meetingIds.Count == 0)
+            return new List<PendingMinuteDto>();
+
+        // Meetings that already have an active action point naming
+        // one of these officers.
+        var agendaRids = await _db.TbMeetingAgendas
+            .Where(a =>
+                a.Active == "Y" &&
+                meetingIds.Contains(a.MeetingRid))
+            .Select(a => new
+            {
+                a.MeetingRid,
+                a.MemberRids
+            })
+            .ToListAsync();
+
         var coveredMeetingIds = agendaRids
             .Where(a => ParseRids(a.MemberRids).Any(memberRids.Contains))
             .Select(a => a.MeetingRid)
             .ToHashSet();
 
-        // A meeting is only "done" when it has BOTH an action point (for these officers) AND a minutes
-        // document. It keeps appearing (and the nav item keeps blinking) until both are present.
+        // Active meetings.
         var meetings = await _db.TbMeetingSchedules
-            .Where(m => m.Active == "Y" && meetingIds.Contains(m.Rid))
+            .Where(m =>
+                m.Active == "Y" &&
+                meetingIds.Contains(m.Rid))
             .OrderByDescending(m => m.MeetingDate)
-            .Select(m => new { m.Rid, m.MeetingDate, m.MeetingPlace, m.MeetingSubject, m.MeetingDocument })
+            .Select(m => new
+            {
+                m.Rid,
+                m.MeetingDate,
+                m.MeetingPlace,
+                m.MeetingSubject,
+                m.MeetingDocument
+            })
             .ToListAsync();
 
+        // Meeting is pending until BOTH action point and minutes document exist.
         var pending = meetings
             .Select(m => new
             {
@@ -530,24 +541,97 @@ public class MeetingsService
             })
             .Where(m => !m.HasActionPoint || !m.HasDocument)
             .ToList();
-        if (pending.Count == 0) return new List<PendingMinuteDto>();
 
-        var pendingRids = pending.Select(p => p.Rid).ToList();
+        if (pending.Count == 0)
+            return new List<PendingMinuteDto>();
+
+        var pendingRids = pending
+            .Select(p => p.Rid)
+            .ToList();
+
         var memberCounts = (await _db.TbMeetingMembers
             .Where(mm => pendingRids.Contains(mm.MeetingRid))
             .GroupBy(mm => mm.MeetingRid)
-            .Select(g => new { g.Key, Count = g.Count() })
+            .Select(g => new
+            {
+                g.Key,
+                Count = g.Count()
+            })
             .ToListAsync())
             .ToDictionary(x => x.Key, x => x.Count);
 
-        return pending.Select(p => new PendingMinuteDto(
-            p.Rid, p.MeetingDate, p.MeetingPlace, p.MeetingSubject,
-            memberCounts.GetValueOrDefault(p.Rid), p.HasActionPoint, p.HasDocument)).ToList();
+        return pending
+            .Select(p => new PendingMinuteDto(
+                p.Rid,
+                p.MeetingDate,
+                p.MeetingPlace,
+                p.MeetingSubject,
+                memberCounts.GetValueOrDefault(p.Rid),
+                p.HasActionPoint,
+                p.HasDocument))
+            .ToList();
     }
 
-    // True when the meeting has at least one member officer serving the given department. An officer's
-    // departments are a flat set (no primary), so this asks the officer-department junction and only
-    // falls back to the legacy DeptId column for officers with no junction rows.
+    // Meetings involving the given member officers — a single officer (officer login) or a whole
+    // department's officers (nodal login) — that are not yet complete: still missing an action point for
+    // any of them, OR the minutes document. Drives the "Pending Upload Minutes" screen + nav blink.
+    //public async Task<List<PendingMinuteDto>> GetPendingMinutesMeetingsAsync(IReadOnlyCollection<int> memberRids)
+    //{
+    //    if (memberRids.Count == 0) return new List<PendingMinuteDto>();
+    //    var idList = memberRids as List<int> ?? memberRids.ToList();
+
+    //    var meetingIds = await _db.TbMeetingMembers
+    //        .Where(mm => idList.Contains(mm.MemberRid))
+    //        .Select(mm => mm.MeetingRid).Distinct().ToListAsync();
+    //    if (meetingIds.Count == 0) return new List<PendingMinuteDto>();
+
+    //    // Meetings that already have an active action point naming one of these officers (their rid in
+    //    // MemberRids). MemberRids is a CSV, so the rid-in-list check is done in memory via ParseRids.
+    //    var agendaRids = await _db.TbMeetingAgendas
+    //        .Where(a => a.Active == "Y" && meetingIds.Contains(a.MeetingRid))
+    //        .Select(a => new { a.MeetingRid, a.MemberRids })
+    //        .ToListAsync();
+    //    var coveredMeetingIds = agendaRids
+    //        .Where(a => ParseRids(a.MemberRids).Any(memberRids.Contains))
+    //        .Select(a => a.MeetingRid)
+    //        .ToHashSet();
+
+    //    // A meeting is only "done" when it has BOTH an action point (for these officers) AND a minutes
+    //    // document. It keeps appearing (and the nav item keeps blinking) until both are present.
+    //    var meetings = await _db.TbMeetingSchedules
+    //        .Where(m => m.Active == "Y" && meetingIds.Contains(m.Rid))
+    //        .OrderByDescending(m => m.MeetingDate)
+    //        .Select(m => new { m.Rid, m.MeetingDate, m.MeetingPlace, m.MeetingSubject, m.MeetingDocument })
+    //        .ToListAsync();
+
+    //    var pending = meetings
+    //        .Select(m => new
+    //        {
+    //            m.Rid,
+    //            m.MeetingDate,
+    //            m.MeetingPlace,
+    //            m.MeetingSubject,
+    //            HasActionPoint = coveredMeetingIds.Contains(m.Rid),
+    //            HasDocument = !string.IsNullOrEmpty(m.MeetingDocument)
+    //        })
+    //        .Where(m => !m.HasActionPoint || !m.HasDocument)
+    //        .ToList();
+    //    if (pending.Count == 0) return new List<PendingMinuteDto>();
+
+    //    var pendingRids = pending.Select(p => p.Rid).ToList();
+    //    var memberCounts = (await _db.TbMeetingMembers
+    //        .Where(mm => pendingRids.Contains(mm.MeetingRid))
+    //        .GroupBy(mm => mm.MeetingRid)
+    //        .Select(g => new { g.Key, Count = g.Count() })
+    //        .ToListAsync())
+    //        .ToDictionary(x => x.Key, x => x.Count);
+
+    //    return pending.Select(p => new PendingMinuteDto(
+    //        p.Rid, p.MeetingDate, p.MeetingPlace, p.MeetingSubject,
+    //        memberCounts.GetValueOrDefault(p.Rid), p.HasActionPoint, p.HasDocument)).ToList();
+    //}
+
+
     public Task<bool> DeptOwnsMeetingAsync(int meetingId, int deptId) =>
         _db.TbMeetingMembers
             .Where(mm => mm.MeetingRid == meetingId)
