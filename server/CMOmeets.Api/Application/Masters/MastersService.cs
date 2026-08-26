@@ -1,3 +1,4 @@
+using CMOmeets.Api.Domain.Entities;
 using CMOmeets.Domain.Data;
 using CMOmeets.Domain.Entities;
 using Microsoft.EntityFrameworkCore;
@@ -136,6 +137,60 @@ public class MastersService
         await _db.SaveChangesAsync();
         return true;
     }
+    //public async Task<List<OfficerDto>> GetOfficersAsync(
+    //int? deptId = null,
+    //bool onlyAssigned = false)
+    //{
+    //    var query = _db.TblOfficers
+    //        .Where(o => o.Active == "Y");
+
+    //    // List 2: sirf woh officers jinki primary designation assign hai
+    //    // (DeptId primary table me kabhi null nahi hota, sirf DesigId null ho sakta hai)
+    //    if (onlyAssigned)
+    //    {
+    //        query = query.Where(o => o.DesigId != null);
+    //    }
+
+    //    // Department filter (primary dept ya mapping table dept, dono me match)
+    //    if (deptId != null)
+    //    {
+    //        query = query.Where(o =>
+    //            o.DeptId == deptId ||
+    //            o.OfficerDepartments.Any(x =>
+    //                x.DeptId == deptId &&
+    //                x.Active == "Y"));
+    //    }
+
+    //    return await query
+    //        .AsNoTracking()
+    //        .OrderBy(o => o.Dept.DepartmentName)
+    //        .ThenBy(o => o.Desig != null ? o.Desig.SeqNo : int.MaxValue)
+    //        .ThenBy(o => o.OfficerName)
+    //        .Select(o => new OfficerDto(
+    //            o.Rid,
+    //            o.DeptId,
+    //            o.Dept.DepartmentName,
+    //            o.DesigId,
+    //            o.Desig != null ? o.Desig.DesigName : null,
+    //            o.OfficerName,
+    //            o.OfficerMobile,
+    //            o.OfficerEmail,
+    //            o.Active == "Y",
+    //            o.OfficerDepartments
+    //                .Where(x => x.Active == "Y")
+    //                .Select(x => new LookupDto(
+    //                    x.DeptId,
+    //                    x.Dept.DepartmentName))
+    //                .ToList(),
+    //            o.OfficerDesignations
+    //                .Where(x => x.Active == "Y")
+    //                .OrderBy(x => x.Desig.SeqNo)
+    //                .Select(x => new LookupDto(
+    //                    x.DesigId,
+    //                    x.Desig.DesigName))
+    //                .ToList()))
+    //        .ToListAsync();
+    //}
     public async Task<List<OfficerDto>> GetOfficersAsync(
     int? deptId = null,
     bool onlyAssigned = false)
@@ -143,14 +198,13 @@ public class MastersService
         var query = _db.TblOfficers
             .Where(o => o.Active == "Y");
 
-        // List 2: sirf woh officers jinki primary designation assign hai
-        // (DeptId primary table me kabhi null nahi hota, sirf DesigId null ho sakta hai)
+        // Sirf woh officers jinki primary designation assigned hai
         if (onlyAssigned)
         {
             query = query.Where(o => o.DesigId != null);
         }
 
-        // Department filter (primary dept ya mapping table dept, dono me match)
+        // Department filter
         if (deptId != null)
         {
             query = query.Where(o =>
@@ -160,66 +214,123 @@ public class MastersService
                     x.Active == "Y"));
         }
 
-        return await query
+        // Officers fetch
+        var officers = await query
             .AsNoTracking()
             .OrderBy(o => o.Dept.DepartmentName)
             .ThenBy(o => o.Desig != null ? o.Desig.SeqNo : int.MaxValue)
             .ThenBy(o => o.OfficerName)
-            .Select(o => new OfficerDto(
+            .Select(o => new
+            {
                 o.Rid,
                 o.DeptId,
-                o.Dept.DepartmentName,
+                DepartmentName = o.Dept.DepartmentName,
                 o.DesigId,
-                o.Desig != null ? o.Desig.DesigName : null,
+                DesigName = o.Desig != null
+                    ? o.Desig.DesigName
+                    : null,
                 o.OfficerName,
                 o.OfficerMobile,
                 o.OfficerEmail,
-                o.Active == "Y",
-                o.OfficerDepartments
+                Active = o.Active == "Y",
+
+                Departments = o.OfficerDepartments
                     .Where(x => x.Active == "Y")
                     .Select(x => new LookupDto(
                         x.DeptId,
                         x.Dept.DepartmentName))
                     .ToList(),
-                o.OfficerDesignations
+
+                Designations = o.OfficerDesignations
                     .Where(x => x.Active == "Y")
                     .OrderBy(x => x.Desig.SeqNo)
                     .Select(x => new LookupDto(
                         x.DesigId,
                         x.Desig.DesigName))
-                    .ToList()))
+                    .ToList()
+            })
             .ToListAsync();
+
+        // Officer IDs
+        var officerIds = officers
+            .Select(x => x.Rid)
+            .ToList();
+
+        // Current ACTIVE mappings only
+        var mappings = await _db.TblOfficerMappings
+            .AsNoTracking()
+            .Where(x =>
+                officerIds.Contains(x.OfficerID) &&
+                x.Active == "1" &&
+                x.DesigID != null)
+            .ToListAsync();
+
+        // Department IDs and Designation IDs used in mappings
+        var departmentIds = mappings
+            .Select(x => x.DeptID)
+            .Distinct()
+            .ToList();
+
+        var designationIds = mappings
+            .Where(x => x.DesigID != null)
+            .Select(x => x.DesigID!.Value)
+            .Distinct()
+            .ToList();
+
+        // Master names
+        var departmentNames = await _db.DepartmentMas
+            .AsNoTracking()
+            .Where(x => departmentIds.Contains(x.Rid))
+            .ToDictionaryAsync(
+                x => x.Rid,
+                x => x.DepartmentName);
+
+        var designationNames = await _db.MasDeptDesignations
+            .AsNoTracking()
+            .Where(x => designationIds.Contains(x.Rid))
+            .ToDictionaryAsync(
+                x => x.Rid,
+                x => x.DesigName);
+
+        // Final DTO
+        return officers
+            .Select(o => new OfficerDto(
+                o.Rid,
+                o.DeptId,
+                o.DepartmentName,
+                o.DesigId,
+                o.DesigName,
+                o.OfficerName,
+                o.OfficerMobile,
+                o.OfficerEmail,
+                o.Active,
+                o.Departments,
+                o.Designations,
+
+                // Exact Dept + Designation mapping
+                mappings
+                    .Where(m =>
+                        m.OfficerID == o.Rid &&
+                        m.DesigID != null)
+                    .Select(m => new OfficerDepartmentDesignationDto(
+                        m.DeptID,
+                        departmentNames.TryGetValue(
+                            m.DeptID,
+                            out var deptName)
+                            ? deptName
+                            : null,
+
+                        m.DesigID!.Value,
+                        designationNames.TryGetValue(
+                            m.DesigID.Value,
+                            out var desigName)
+                            ? desigName
+                            : null
+                    ))
+                    .ToList()
+            ))
+            .ToList();
     }
-    // ---------- Officers ----------
-    // An officer is listed under any department it serves (its primary DeptId or designation id).
-    //public async Task<List<OfficerDto>> GetOfficersAsync(int? deptId = null) =>
-    //await _db.TblOfficers
-    //   .Where(o =>
-    //    o.Active == "Y" &&
-    //    (
-    //        deptId == null ||
-    //        o.DeptId == deptId ||
-    //        o.OfficerDepartments.Any(x =>
-    //            x.DeptId == deptId && x.Active == "Y")
-    //    ))
-    //    .OrderBy(o => o.Dept.DepartmentName)
-    //    .ThenBy(o => o.Desig != null ? o.Desig.SeqNo : int.MaxValue)
-    //    .Select(o => new OfficerDto(
-    //        o.Rid,
-    //        o.DeptId,
-    //        o.Dept.DepartmentName,
-    //        o.DesigId,
-    //        o.Desig != null ? o.Desig.DesigName : null,   // ✅ string? — null theek hai
-    //        o.OfficerName,
-    //        o.OfficerMobile,
-    //        o.OfficerEmail,
-    //        o.Active == "Y",
-    //        o.OfficerDepartments.Where(x => x.Active == "Y")
-    //            .Select(x => new LookupDto(x.DeptId, x.Dept.DepartmentName)).ToList(),
-    //        o.OfficerDesignations.Where(x => x.Active == "Y")
-    //            .OrderBy(x => x.Desig.SeqNo)
-    //            .Select(x => new LookupDto(x.DesigId, x.Desig.DesigName)).ToList()))
-    //    .ToListAsync();
 
     private async Task ClearOfficerRemovedDesignationAsync(
     int officerId,
@@ -247,6 +358,66 @@ public class MastersService
 
         await _db.SaveChangesAsync();
     }
+    //create officer Table mapping while create and Edit the officer's info
+    private async Task SyncOfficerMappingAsync(int officerId, List<int> depts, List<int> desigs, string actor)
+    {
+        // Purani active mappings ko deactivate karo (history preserve karte hue)
+        var activeMappings = await _db.TblOfficerMappings
+            .Where(m => m.OfficerID == officerId && m.Active == "1")
+            .ToListAsync();
+
+        foreach (var old in activeMappings)
+        {
+            old.Active = "0";
+            old.EffectiveTo = DateTime.Now;
+            old.UpdatedAt = DateTime.Now;
+            old.UpdatedBy = actor;
+        }
+
+        // Har dept ke liye uske valid designations nikaalo (DeptDesignation-scoped)
+        var deptDesigPairs = await _db.MasDeptDesignations
+            .Where(x => desigs.Contains(x.Rid) && depts.Contains(x.DeptId))
+            .Select(x => new { x.DeptId, DesigId = x.Rid })
+            .ToListAsync();
+
+        var primaryDeptId = depts[0];
+
+        foreach (var pair in deptDesigPairs)
+        {
+            _db.TblOfficerMappings.Add(new TblOfficerMapping
+            {
+                OfficerID = officerId,
+                DeptID = pair.DeptId,
+                DesigID = pair.DesigId,
+                Active = "1",
+                IsPrimary = pair.DeptId == primaryDeptId ? "1" : "0",
+                EffectiveFrom = DateTime.Now,
+                CreatedAt = DateTime.Now,
+                CreatedBy = actor
+            });
+        }
+
+        // Agar koi department bina kisi designation ke select hui hai (desig list mein match nahi mila),
+        // to bhi ek mapping row banao taaki dept-only membership track ho
+        var deptsWithDesig = deptDesigPairs.Select(p => p.DeptId).Distinct().ToList();
+        foreach (var deptOnly in depts.Except(deptsWithDesig))
+        {
+            _db.TblOfficerMappings.Add(new TblOfficerMapping
+            {
+                OfficerID = officerId,
+                DeptID = deptOnly,
+                DesigID = null,
+                Active = "1",
+                IsPrimary = deptOnly == primaryDeptId ? "1" : "0",
+                EffectiveFrom = DateTime.Now,
+                CreatedAt = DateTime.Now,
+                CreatedBy = actor
+            });
+        }
+
+        await _db.SaveChangesAsync();
+    }
+
     //create officer and also possible insert the values in mapping table 
     public async Task<OfficerDto?> CreateOfficerAsync(OfficerSaveDto dto, string actor)
     {
@@ -263,6 +434,7 @@ public class MastersService
         // A post belongs to one officer: if any picked post is already held, either 409 (unconfirmed)
         // or free it from its current holder (confirmed reassign).
         var displaced = await ResolvePostConflictsAsync(desigs, excludeOfficerId: 0, dto.Force);
+        await DeactivateDisplacedMappingsAsync(displaced, actor);
         var entity = new TblOfficer
         {
             DeptId = depts[0],   // primary department = first selected (no separate "home" dept anymore)
@@ -278,32 +450,12 @@ public class MastersService
         await _db.SaveChangesAsync();
         await SyncOfficerDepartmentsAsync(entity.Rid, depts);
         await SyncOfficerDesignationsAsync(entity.Rid, desigs);
+        await SyncOfficerMappingAsync(entity.Rid, depts, desigs, actor);
         // Done once the new officer has a rid: the displaced holders' action points follow the post.
         await TransferActionPointsAsync(displaced, entity.Rid);
         return (await GetOfficersAsync()).First(o => o.Rid == entity.Rid);
     }
-    //previous method
-    //public async Task<bool> UpdateOfficerAsync(int id, OfficerSaveDto dto, string actor)
-    //{
-    //    var entity = await _db.TblOfficers.FindAsync(id);
-    //    if (entity is null) return false;
-    //    var depts = NormalizeDepartments(dto.DepartmentIds);
-    //    var desigs = NormalizeDesignations(dto.DesignationIds);
-    //    var displaced = await ResolvePostConflictsAsync(desigs, excludeOfficerId: id, dto.Force);
-    //    entity.DeptId = depts[0];   // primary department = first selected
-    //    entity.DesigId = await ResolvePrimaryDesignationAsync(desigs, depts[0]);
-    //    entity.OfficerName = dto.OfficerName.Trim();
-    //    entity.OfficerMobile = dto.OfficerMobile.Trim();
-    //    entity.OfficerEmail = dto.OfficerEmail.Trim();
-    //    entity.Active = ToFlag(dto.Active);
-    //    entity.UpdatedAt = DateTime.Now;
-    //    entity.UpdatedBy = actor;
-    //    await _db.SaveChangesAsync();
-    //    await SyncOfficerDepartmentsAsync(entity.Rid, depts);
-    //    await SyncOfficerDesignationsAsync(entity.Rid, desigs);
-    //    await TransferActionPointsAsync(displaced, entity.Rid);
-    //    return true;
-    //}
+  
     public async Task<bool> UpdateOfficerAsync(int id, OfficerSaveDto dto, string actor)
     {
         var entity = await _db.TblOfficers.FindAsync(id);
@@ -321,6 +473,7 @@ public class MastersService
         var desigs = NormalizeDesignations(dto.DesignationIds);
 
         var displaced = await ResolvePostConflictsAsync(desigs, excludeOfficerId: 0, dto.Force);
+        await DeactivateDisplacedMappingsAsync(displaced, actor);
         var newDeptId = depts[0];
         var newDesigId = await ResolvePrimaryDesignationAsync(desigs, newDeptId);
 
@@ -340,7 +493,7 @@ public class MastersService
 
         await SyncOfficerDepartmentsAsync(entity.Rid, depts);
         await SyncOfficerDesignationsAsync(entity.Rid, desigs);
-
+        await SyncOfficerMappingAsync(entity.Rid, depts, desigs, actor);
         if (removedDesigIds.Count > 0)
         {
             await ClearOfficerRemovedDesignationAsync(
@@ -564,6 +717,34 @@ public class MastersService
         }
         await _db.SaveChangesAsync();
         return displacedPairs;
+    }
+    private async Task DeactivateDisplacedMappingsAsync(List<(int OfficerId, int DesigId)> displaced, string actor)
+    {
+        if (displaced.Count == 0) return;
+
+        var desigIds = displaced.Select(d => d.DesigId).Distinct().ToList();
+        var officerIds = displaced.Select(d => d.OfficerId).Distinct().ToList();
+
+        var rows = await _db.TblOfficerMappings
+            .Where(m => m.Active == "1"
+                     && officerIds.Contains(m.OfficerID)
+                     && m.DesigID.HasValue
+                     && desigIds.Contains(m.DesigID.Value))
+            .ToListAsync();
+
+        // sirf wahi (OfficerId, DesigId) pairs deactivate karo jo displaced list mein hain
+        var toDeactivate = rows.Where(r =>
+            displaced.Any(d => d.OfficerId == r.OfficerID && d.DesigId == r.DesigID)).ToList();
+
+        foreach (var m in toDeactivate)
+        {
+            m.Active = "0";
+            m.EffectiveTo = DateTime.Now;
+            m.UpdatedAt = DateTime.Now;
+            m.UpdatedBy = actor;
+        }
+
+        await _db.SaveChangesAsync();
     }
 
     private async Task<List<(int OfficerId, int DesigId)>> ResolvePostConflictsAsync(List<int> desigIds, int excludeOfficerId, bool force)

@@ -13,7 +13,7 @@ public record DesignationSaveDto(int DeptId, string DesigName, int SeqNo, bool A
 // designations they hold (one per department — each designation belongs to exactly one department).
 // DeptId/DepartmentName and DesigId/DesigName echo the primary (first) department and its designation
 // for backward-compatible ordering/scoping and single-designation displays.
-public record OfficerDto(int Rid, int DeptId, string DepartmentName, int? DesigId, string? DesigName, string OfficerName, string OfficerMobile, string OfficerEmail, bool Active, List<LookupDto> Departments, List<LookupDto> Designations);
+public record OfficerDto(int Rid, int DeptId, string DepartmentName, int? DesigId, string? DesigName, string OfficerName, string OfficerMobile, string OfficerEmail, bool Active, List<LookupDto> Departments, List<LookupDto> Designations, List<OfficerDepartmentDesignationDto>? DepartmentDesignations);
 // Force = the caller confirmed reassigning posts that are already held by other officers.
 public record OfficerSaveDto(List<int> DesignationIds, string OfficerName, string OfficerMobile, string OfficerEmail, bool Active, List<int> DepartmentIds, bool Force = false);
 // A post (designation) that is already held by another active officer, returned on a 409 so the UI
@@ -24,3 +24,11 @@ public record DistrictDto(string DCode, string DName, bool IsActive);
 public record DistrictSaveDto(string DCode, string DName, bool IsActive);
 
 public record LookupDto(int Id, string Name);
+//created by Developer
+public record OfficerDepartmentDesignationDto(
+    int DepartmentId,
+    string? DepartmentName,
+    int DesignationId,
+    string? DesignationName
+);
+

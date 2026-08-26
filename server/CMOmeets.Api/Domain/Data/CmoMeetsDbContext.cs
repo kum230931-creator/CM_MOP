@@ -14,7 +14,7 @@ public partial class CmoMeetsDbContext : IdentityDbContext<AppUser>
         : base(options)
     {
     }
-
+    public DbSet<TblOfficerMapping> TblOfficerMappings { get; set; }
     public virtual DbSet<DepartmentMa> DepartmentMas { get; set; }
 
     public virtual DbSet<DesignationMa> DesignationMas { get; set; }
@@ -403,6 +403,38 @@ public partial class CmoMeetsDbContext : IdentityDbContext<AppUser>
                 .HasForeignKey(d => d.MemberRid)
                 .OnDelete(DeleteBehavior.ClientSetNull)
                 .HasConstraintName("FK_members_officer");
+        });
+        modelBuilder.Entity<TblOfficerMapping>(entity =>
+        {
+            entity.ToTable("tb_officermapping");
+
+            entity.HasKey(e => e.Rid);
+            entity.Property(e => e.Rid).HasColumnName("RID").ValueGeneratedOnAdd();
+
+            entity.Property(e => e.OfficerID).HasColumnName("OfficerID").IsRequired();
+            entity.Property(e => e.DeptID).HasColumnName("DeptID").IsRequired();
+            entity.Property(e => e.DesigID).HasColumnName("DesigID");
+
+            entity.Property(e => e.Active).HasColumnName("Active").HasColumnType("char(1)").HasDefaultValue("1");
+            entity.Property(e => e.IsPrimary).HasColumnName("IsPrimary").HasColumnType("char(1)").HasDefaultValue("1");
+
+            entity.Property(e => e.EffectiveFrom).HasColumnName("EffectiveFrom").HasDefaultValueSql("GETDATE()");
+            entity.Property(e => e.EffectiveTo).HasColumnName("EffectiveTo");
+
+            entity.Property(e => e.CreatedAt).HasColumnName("CreatedAt").HasDefaultValueSql("GETDATE()");
+            entity.Property(e => e.CreatedBy).HasColumnName("CreatedBy").HasMaxLength(150).IsRequired();
+
+            entity.Property(e => e.UpdatedAt).HasColumnName("UpdatedAt");
+            entity.Property(e => e.UpdatedBy).HasColumnName("UpdatedBy").HasMaxLength(150);
+
+            // Unique filtered index: ek active designation sirf ek officer ke paas
+            entity.HasIndex(e => e.DesigID)
+                .IsUnique()
+                .HasFilter("[Active] = '1' AND [DesigID] IS NOT NULL")
+                .HasDatabaseName("UX_OfficerMapping_ActiveDesig");
+
+            entity.HasIndex(e => new { e.OfficerID, e.Active })
+                .HasDatabaseName("IX_OfficerMapping_Officer_Active");
         });
 
         modelBuilder.Entity<TbMeetingSchedule>(entity =>
