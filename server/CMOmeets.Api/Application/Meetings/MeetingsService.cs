@@ -13,8 +13,8 @@ public class MeetingsService
 
 
     public async Task<List<MeetingListDto>> GetMeetingsAsync(
-        bool includeInactive = false,
-        ScopeRequest? scope = null)
+       bool includeInactive = false,
+       ScopeRequest? scope = null)
     {
         // Resolve the normal scope first.
         var scopeRids = await ScopeResolver.ResolveRidsAsync(_db, scope);
@@ -43,6 +43,25 @@ public class MeetingsService
                     mm.DesignationId != 0));
         }
 
+        // ============================================================
+        // DEPARTMENT FILTER
+        // If DeptFilter is supplied, show ONLY meetings having at least
+        // one valid member assigned to that exact department.
+        //
+        // Department is stored directly in TbMeetingMembers.DepartmentId.
+        // ============================================================
+        if (scope?.DeptFilter is int deptId)
+        {
+            query = query.Where(m =>
+                _db.TbMeetingMembers.Any(mm =>
+                    mm.MeetingRid == m.Rid &&
+                    mm.MemberRid != 0 &&
+                    mm.DesignationId != 0 &&
+                    mm.DepartmentId == deptId
+                )
+            );
+        }
+
         var meetings = await query
             .OrderByDescending(m => m.MeetingDate)
             .Select(m => new
@@ -64,10 +83,9 @@ public class MeetingsService
         if (ids.Count == 0)
             return new List<MeetingListDto>();
 
-        // Only valid meeting-member assignments are considered.
-        //
-        // MemberRid = 0 OR DesignationId = 0 means the member is no longer
-        // validly assigned to the meeting.
+        // ============================================================
+        // ONLY VALID / ACTIVE OFFICERS ARE CONSIDERED AS MEMBERS
+        // ============================================================
         var members = await (
             from mm in _db.TbMeetingMembers
             join o in _db.TblOfficers
@@ -83,6 +101,9 @@ public class MeetingsService
             }
         ).ToListAsync();
 
+        // ============================================================
+        // AGENDAS
+        // ============================================================
         var agendas = await _db.TbMeetingAgendas
             .Where(a =>
                 a.Active == "Y" &&
@@ -95,13 +116,17 @@ public class MeetingsService
                 a.AgendaDueDt,
                 a.AgendaStatus,
 
-                // Whether a concerned department has opened (expanded) this point.
+                // Whether a concerned department has opened (expanded)
+                // this point.
                 Opened = _db.TbActionPointViews.Any(v =>
                     v.AgendaRid == a.Rid)
             })
             .ToListAsync();
 
-        // A scoped login counts only its own active members and action points.
+        // ============================================================
+        // A scoped login counts only its own active members and
+        // action points.
+        // ============================================================
         if (scopeRids is not null)
         {
             members = members
@@ -115,13 +140,18 @@ public class MeetingsService
                 .ToList();
         }
 
+        // ============================================================
+        // MEMBER COUNTS
+        // ============================================================
         var memberCounts = members
             .GroupBy(mm => mm.MeetingRid)
             .ToDictionary(
                 g => g.Key,
                 g => g.Count());
 
-        // Classify every point with the app-wide status signal.
+        // ============================================================
+        // CLASSIFY AGENDA / ACTION POINT STATUS
+        // ============================================================
         var todayD = DateOnly.FromDateTime(DateTime.Today);
         var todayNum = todayD.DayNumber;
 
@@ -159,24 +189,36 @@ public class MeetingsService
             })
             .ToList();
 
+        // ============================================================
+        // POINT COUNTS
+        // ============================================================
         var pointCounts = classified
             .GroupBy(a => a.MeetingRid)
             .ToDictionary(
                 g => g.Key,
                 g => g.Count());
 
+        // ============================================================
+        // COMPLETED COUNTS
+        // ============================================================
         var completedCounts = classified
             .GroupBy(a => a.MeetingRid)
             .ToDictionary(
                 g => g.Key,
                 g => g.Count(a => a.Status == "Completed"));
 
+        // ============================================================
+        // OVERDUE COUNTS
+        // ============================================================
         var overDueCounts = classified
             .GroupBy(a => a.MeetingRid)
             .ToDictionary(
                 g => g.Key,
                 g => g.Count(a => a.Status == "OverDue"));
 
+        // ============================================================
+        // OVERDUE 0-7 DAYS
+        // ============================================================
         var od0To7 = classified
             .GroupBy(a => a.MeetingRid)
             .ToDictionary(
@@ -185,6 +227,9 @@ public class MeetingsService
                     a.Status == "OverDue" &&
                     a.OverdueDays <= 7));
 
+        // ============================================================
+        // OVERDUE 8-30 DAYS
+        // ============================================================
         var od8To30 = classified
             .GroupBy(a => a.MeetingRid)
             .ToDictionary(
@@ -194,6 +239,9 @@ public class MeetingsService
                     a.OverdueDays > 7 &&
                     a.OverdueDays <= 30));
 
+        // ============================================================
+        // OVERDUE 31-60 DAYS
+        // ============================================================
         var od31To60 = classified
             .GroupBy(a => a.MeetingRid)
             .ToDictionary(
@@ -203,6 +251,9 @@ public class MeetingsService
                     a.OverdueDays > 30 &&
                     a.OverdueDays <= 60));
 
+        // ============================================================
+        // OVERDUE 60+ DAYS
+        // ============================================================
         var od60Plus = classified
             .GroupBy(a => a.MeetingRid)
             .ToDictionary(
@@ -211,12 +262,18 @@ public class MeetingsService
                     a.Status == "OverDue" &&
                     a.OverdueDays > 60));
 
+        // ============================================================
+        // IN-PROGRESS COUNTS
+        // ============================================================
         var inProgressCounts = classified
             .GroupBy(a => a.MeetingRid)
             .ToDictionary(
                 g => g.Key,
                 g => g.Count(a => a.Status == "InProgress"));
 
+        // ============================================================
+        // PROGRESS PERCENTAGE
+        // ============================================================
         var progressPct = classified
             .GroupBy(a => a.MeetingRid)
             .ToDictionary(
@@ -224,12 +281,18 @@ public class MeetingsService
                 g => (int)Math.Round(
                     g.Average(a => (double)a.EffProgress)));
 
+        // ============================================================
+        // OPENED COUNTS
+        // ============================================================
         var openedCounts = classified
             .GroupBy(a => a.MeetingRid)
             .ToDictionary(
                 g => g.Key,
                 g => g.Count(a => a.Opened));
 
+        // ============================================================
+        // SCORE BY MEETING
+        // ============================================================
         var scoreByMeeting = classified
             .GroupBy(a => a.MeetingRid)
             .ToDictionary(
@@ -240,6 +303,9 @@ public class MeetingsService
                     g.Count(a => a.Status == "InProgress"),
                     g.Count(a => a.Status == "OverDue")));
 
+        // ============================================================
+        // FINAL RESPONSE
+        // ============================================================
         return meetings
             .Select(m =>
             {

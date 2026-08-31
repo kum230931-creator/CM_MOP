@@ -25,7 +25,11 @@ public record ScopeRequest(
 
     // The single department a dept-keyed filter should pin to: a nodal's own dept, or an admin/cm's
     // ?deptId title-bar pick. Null for officer/admin-all/cm-all — officers narrow via the resolved rid set.
-    public int? DeptFilter => IsNodal ? NodalDeptId : ((IsAdmin || IsCm) ? RequestedDeptId : null);
+
+    //edited by developer
+    //public int? DeptFilter => IsNodal ? NodalDeptId : ((IsAdmin || IsCm) ? RequestedDeptId : null);
+    public int? DeptFilter =>
+    IsNodal ? NodalDeptId : RequestedDeptId;
 }
 
 public static class ScopeResolver
