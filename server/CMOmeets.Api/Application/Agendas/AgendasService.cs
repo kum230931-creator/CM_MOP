@@ -10,27 +10,53 @@ public class AgendasService
     private readonly CmoMeetsDbContext _db;
     public AgendasService(CmoMeetsDbContext db) => _db = db;
 
-    public async Task<List<AgendaDto>> GetAgendasByMeetingAsync(int meetingId, ScopeRequest? scope = null)
+    public async Task<List<AgendaDto>> GetAgendasByMeetingAsync(
+     int meetingId,
+     ScopeRequest? scope = null)
     {
         var scopeRids = await ScopeResolver.ResolveRidsAsync(_db, scope);
-        if (scopeRids is not null && !await MeetingHasMemberAsync(meetingId, scopeRids))
+
+        if (scopeRids is not null &&
+            !await MeetingHasMemberAsync(meetingId, scopeRids))
+        {
             return new List<AgendaDto>();
+        }
 
         var rows = await _db.TbMeetingAgendas
-            .Where(a => a.MeetingRid == meetingId && a.Active == "Y")
+            .Where(a =>
+                a.MeetingRid == meetingId &&
+                a.Active == "Y")
             .OrderBy(a => a.Rid)
             .Select(a => new
             {
-                a.Rid, a.MeetingRid, a.MeetingAgenda, a.AgendaMembers, a.MemberRids,
-                a.AgendaDueDt, a.DistrictName, a.AgendaStatus, a.AddedAt,
-                a.IsOfficerCalled, a.OfficerRemark,
-                RemarksCount = _db.TbRemarksOnAgendas.Count(r => r.AgendaRid == a.Rid),
-                // Whether a concerned department has opened (expanded) this point, and when / by whom.
-                Opened = _db.TbActionPointViews.Any(v => v.AgendaRid == a.Rid),
+                a.Rid,
+                a.MeetingRid,
+                a.MeetingAgenda,
+                a.AgendaMembers,
+                a.MemberRids,
+                a.AgendaDueDt,
+                a.DistrictName,
+                a.AgendaStatus,
+                a.AddedAt,
+                a.IsOfficerCalled,
+                a.OfficerRemark,
+
+                RemarksCount = _db.TbRemarksOnAgendas
+                    .Count(r => r.AgendaRid == a.Rid),
+
+                // Whether a concerned department has opened
+                // (expanded) this action point
+                Opened = _db.TbActionPointViews
+                    .Any(v => v.AgendaRid == a.Rid),
+
                 FirstViewedAt = _db.TbActionPointViews
-                    .Where(v => v.AgendaRid == a.Rid).Min(v => (DateTime?)v.FirstViewedAt),
+                    .Where(v => v.AgendaRid == a.Rid)
+                    .Min(v => (DateTime?)v.FirstViewedAt),
+
                 LastViewedAt = _db.TbActionPointViews
-                    .Where(v => v.AgendaRid == a.Rid).Max(v => (DateTime?)v.LastViewedAt),
+                    .Where(v => v.AgendaRid == a.Rid)
+                    .Max(v => (DateTime?)v.LastViewedAt),
+
                 ViewedBy = _db.TbActionPointViews
                     .Where(v => v.AgendaRid == a.Rid)
                     .OrderByDescending(v => v.LastViewedAt)
@@ -39,26 +65,108 @@ public class AgendasService
             })
             .ToListAsync();
 
-        // A scoped login (department or officer) only sees action points that involve one of its
-        // own officer rids (the whole department's officers, or the single officer respectively).
-        if (scopeRids is not null)
-            rows = rows.Where(a => ParseRids(a.MemberRids).Any(scopeRids.Contains)).ToList();
+
+        // =========================================================
+        // OFFICER-SPECIFIC FILTER
+        // =========================================================
+        // If a specific officerId was requested, show only those
+        // action points where that officer's RID exists in MemberRids.
+        //
+        // Example:
+        // officerId = 45
+        // MemberRids = "12,45,78"
+        // => This agenda will be included.
+        //
+        // MemberRids = "12,78"
+        // => This agenda will NOT be included.
+        // =========================================================
+
+        if (scope?.RequestedOfficerId is int requestedOfficerId)
+        {
+            rows = rows
+                .Where(a =>
+                    ParseRids(a.MemberRids)
+                        .Contains(requestedOfficerId))
+                .ToList();
+        }
+        else if (scopeRids is not null)
+        {
+            // =====================================================
+            // EXISTING SCOPE FILTER
+            // =====================================================
+            // No specific officer selected, so keep the existing
+            // department / scope based filtering.
+            // =====================================================
+
+            rows = rows
+                .Where(a =>
+                    ParseRids(a.MemberRids)
+                        .Any(scopeRids.Contains))
+                .ToList();
+        }
+
+
+        // =========================================================
+        // EXISTING STATUS / PROGRESS LOGIC
+        // =========================================================
 
         var today = DateOnly.FromDateTime(DateTime.Today);
-        var evalMap = await PointEvaluator.EvaluateManyAsync(_db,
-            rows.Select(a => new AgendaHeader(a.Rid, a.MemberRids, a.AgendaDueDt, a.AgendaStatus)).ToList(), today);
-        var contacts = await OfficerContacts.LoadAsync(_db, rows.Select(a => a.MemberRids));
-        return rows.Select(a =>
-        {
-            var (status, progress) = evalMap[a.Rid];
-            return new AgendaDto(
-                a.Rid, a.MeetingRid, a.MeetingAgenda, a.AgendaMembers, a.MemberRids,
-                a.AgendaDueDt, a.DistrictName, status,
-                a.RemarksCount, progress, a.AddedAt,
-                a.Opened, a.FirstViewedAt, a.LastViewedAt, a.ViewedBy,
-                OfficerContacts.Resolve(a.MemberRids, a.AgendaMembers, contacts),
-                a.IsOfficerCalled, a.OfficerRemark);
-        }).ToList();
+
+        var evalMap = await PointEvaluator.EvaluateManyAsync(
+            _db,
+            rows
+                .Select(a =>
+                    new AgendaHeader(
+                        a.Rid,
+                        a.MemberRids,
+                        a.AgendaDueDt,
+                        a.AgendaStatus))
+                .ToList(),
+            today);
+
+
+        // =========================================================
+        // EXISTING OFFICER CONTACT LOGIC
+        // =========================================================
+
+        var contacts = await OfficerContacts.LoadAsync(
+            _db,
+            rows.Select(a => a.MemberRids));
+
+
+        // =========================================================
+        // EXISTING DTO MAPPING
+        // =========================================================
+
+        return rows
+            .Select(a =>
+            {
+                var (status, progress) = evalMap[a.Rid];
+
+                return new AgendaDto(
+                    a.Rid,
+                    a.MeetingRid,
+                    a.MeetingAgenda,
+                    a.AgendaMembers,
+                    a.MemberRids,
+                    a.AgendaDueDt,
+                    a.DistrictName,
+                    status,
+                    a.RemarksCount,
+                    progress,
+                    a.AddedAt,
+                    a.Opened,
+                    a.FirstViewedAt,
+                    a.LastViewedAt,
+                    a.ViewedBy,
+                    OfficerContacts.Resolve(
+                        a.MemberRids,
+                        a.AgendaMembers,
+                        contacts),
+                    a.IsOfficerCalled,
+                    a.OfficerRemark);
+            })
+            .ToList();
     }
 
     // Single action point by id, scope-checked — drives the action-point detail page.
@@ -627,21 +735,34 @@ public class AgendasService
             .OrderByDescending(p => p.DueDays)
             .ToList();
     }
-  
-public async Task<List<ActionablePointDto>> GetAllActionablePointsAsync(
-    string? statusFilter = null,
-    ScopeRequest? scope = null)
+
+    public async Task<List<ActionablePointDto>> GetAllActionablePointsAsync(
+        string? statusFilter = null,
+        ScopeRequest? scope = null)
     {
         var scopeRids = await ScopeResolver.ResolveRidsAsync(_db, scope);
         var today = DateOnly.FromDateTime(DateTime.Today);
 
-        // Coarse pre-filter:
-        // For a scoped login, keep only points on meetings
-        // that include at least one officer from the current scope.
+        // ------------------------------------------------------------
+        // Coarse pre-filter
+        // ------------------------------------------------------------
+        // If a specific officer is requested, only meetings containing
+        // that officer are considered.
+        //
+        // Otherwise, existing scope-based filtering remains unchanged.
+        // ------------------------------------------------------------
+
         var agendaQuery = _db.TbMeetingAgendas
             .Where(a => a.Active == "Y");
 
-        if (scopeRids is not null)
+        if (scope?.RequestedOfficerId is int requestedOfficerId)
+        {
+            agendaQuery = agendaQuery.Where(a =>
+                _db.TbMeetingMembers.Any(mm =>
+                    mm.MeetingRid == a.MeetingRid &&
+                    mm.MemberRid == requestedOfficerId));
+        }
+        else if (scopeRids is not null)
         {
             agendaQuery = agendaQuery.Where(a =>
                 _db.TbMeetingMembers.Any(mm =>
@@ -649,7 +770,11 @@ public async Task<List<ActionablePointDto>> GetAllActionablePointsAsync(
                     scopeRids.Contains(mm.MemberRid)));
         }
 
-        // Load agenda records.
+
+        // ------------------------------------------------------------
+        // Load agenda records
+        // ------------------------------------------------------------
+
         var rows = await (
             from a in agendaQuery
             join m in _db.TbMeetingSchedules
@@ -676,9 +801,28 @@ public async Task<List<ActionablePointDto>> GetAllActionablePointsAsync(
             })
             .ToListAsync();
 
-        // Precise per-point filter:
-        // Only points where a scope officer is actually responsible.
-        if (scopeRids is not null)
+
+        // ------------------------------------------------------------
+        // Precise per-point filter
+        // ------------------------------------------------------------
+        // IMPORTANT:
+        //
+        // If officerId is specified:
+        //      ONLY that officer's action points.
+        //
+        // Otherwise:
+        //      Existing scope-based filtering.
+        // ------------------------------------------------------------
+
+        if (scope?.RequestedOfficerId is int officerId)
+        {
+            rows = rows
+                .Where(a =>
+                    ParseRids(a.MemberRids)
+                        .Contains(officerId))
+                .ToList();
+        }
+        else if (scopeRids is not null)
         {
             rows = rows
                 .Where(a =>
@@ -687,9 +831,11 @@ public async Task<List<ActionablePointDto>> GetAllActionablePointsAsync(
                 .ToList();
         }
 
+
         // ------------------------------------------------------------
         // Existing evaluator
         // ------------------------------------------------------------
+
         var evalMap = await PointEvaluator.EvaluateManyAsync(
             _db,
             rows.Select(a => new AgendaHeader(
@@ -700,20 +846,11 @@ public async Task<List<ActionablePointDto>> GetAllActionablePointsAsync(
             )).ToList(),
             today);
 
+
         // ------------------------------------------------------------
-        // Local correction for this API only.
-        //
-        // We DO NOT modify PointEvaluator.EvaluateManyAsync().
-        // If an agenda is explicitly marked as Completed in DB,
-        // preserve Completed + 100 for this actionable-points API.
-        //
-        // This prevents cases like:
-        // Rid = 113
-        // AgendaStatus = Completed
-        // MemberRids = blank
-        //
-        // from being recalculated as Completed + 0.
+        // Existing local correction
         // ------------------------------------------------------------
+
         foreach (var a in rows)
         {
             if (string.Equals(
@@ -725,12 +862,20 @@ public async Task<List<ActionablePointDto>> GetAllActionablePointsAsync(
             }
         }
 
-        // Load officer contacts.
+
+        // ------------------------------------------------------------
+        // Load officer contacts
+        // ------------------------------------------------------------
+
         var contacts = await OfficerContacts.LoadAsync(
             _db,
             rows.Select(a => a.MemberRids));
 
-        // Map to existing response DTO.
+
+        // ------------------------------------------------------------
+        // Map to existing response DTO
+        // ------------------------------------------------------------
+
         var mapped = rows.Select(a =>
         {
             var (status, progress) = evalMap[a.Rid];
@@ -764,8 +909,11 @@ public async Task<List<ActionablePointDto>> GetAllActionablePointsAsync(
             );
         });
 
-        // Apply status filter AFTER evaluation,
-        // exactly as the existing API was doing.
+
+        // ------------------------------------------------------------
+        // Apply status filter AFTER evaluation
+        // ------------------------------------------------------------
+
         if (!string.IsNullOrWhiteSpace(statusFilter))
         {
             mapped = mapped.Where(p =>
