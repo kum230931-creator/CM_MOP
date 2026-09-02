@@ -11,8 +11,18 @@ public class DashboardService
     private readonly CmoMeetsDbContext _db;
     public DashboardService(CmoMeetsDbContext db) => _db = db;
 
-    private record AgendaRow(long Rid, int MeetingRid, string? MeetingSubject, DateTime MeetingDate,
-        string MeetingAgenda, string? AgendaMembers, string? MemberRids, string DistrictName, DateOnly? AgendaDueDt, string AgendaStatus);
+    private record AgendaRow(
+    long Rid,
+    int MeetingRid,
+    string? MeetingSubject,
+    DateTime MeetingDate,
+    string MeetingAgenda,
+    string? AgendaMembers,
+    string? MemberRids,
+    string DistrictName,
+    DateOnly? AgendaDueDt,
+    string AgendaStatus,
+    string? DepartmentIDs);
 
     //private async Task<List<AgendaRow>> LoadAsync(long? groupId, ScopeRequest? scope)
     //{
@@ -69,7 +79,8 @@ public class DashboardService
                 a.MemberRids,
                 a.DistrictName,
                 a.AgendaDueDt,
-                a.AgendaStatus);
+                a.AgendaStatus,
+                a.DepartmentIDs);
 
         if (groupId is not null)
         {
@@ -87,12 +98,6 @@ public class DashboardService
         var rows = await query.ToListAsync();
 
         // A scoped login counts action points involving its scoped officer(s).
-        //
-        // Normal officer:
-        //     only his/her own RID
-        //
-        // Nodal / CMO:
-        //     existing department-based RIDs
         if (scopeRids is not null)
         {
             rows = rows
@@ -102,9 +107,19 @@ public class DashboardService
                 .ToList();
         }
 
+        // NEW: officer login + a specific department selected from the dropdown
+        // -> keep only points where THIS officer's own involvement is in that department.
+        if (scope?.IsOfficer == true &&
+            scope.OfficerLoginId is int off &&
+            scope.DeptFilter is int deptFilter)
+        {
+            rows = rows
+                .Where(r => DeptForOfficer(r.DepartmentIDs, off) == deptFilter)
+                .ToList();
+        }
+
         return rows;
     }
-
     // Per-officer status/progress for a set of loaded points (shared by the counter/list endpoints):
     // a point is Completed only when every responsible officer has completed. See PointEvaluator.
     private Task<Dictionary<long, (string Status, int Progress)>> EvaluateAsync(List<AgendaRow> rows) =>
@@ -178,7 +193,8 @@ public class DashboardService
             query = query.Where(m =>
                 _db.TbMeetingMembers.Any(mm =>
                     mm.MeetingRid == m.Rid &&
-                    scopeRids.Contains(mm.MemberRid)));
+                    scopeRids.Contains(mm.MemberRid) &&
+                    (scope!.DeptFilter == null || mm.DepartmentId == scope.DeptFilter)));
         }
 
         return await query.CountAsync();
@@ -229,83 +245,118 @@ public class DashboardService
         return matching.Select(r => ToPoint(r, today, evalMap[r.Rid].Status, contacts)).ToList();
     }
 
-    public async Task<List<MeetingAbstractDto>> GetMeetingAbstractAsync(long? groupId = null, ScopeRequest? scope = null)
+    public async Task<List<MeetingAbstractDto>> GetMeetingAbstractAsync(
+    long? groupId = null,
+    ScopeRequest? scope = null)
     {
         var scopeRids = await ScopeResolver.ResolveRidsAsync(_db, scope);
-        // Pull each active point with its stored status flag so the per-meeting counts and Score use
-        // the SAME completion signal as the Meetings screen, the per-meeting action-points screen and
-        // Reports (AgendaStatusHelper: the stored flag + due date, not raw ATR progress — legacy
-        // backfilled points are Completed with no progress recorded).
-        var query =
-            from a in _db.TbMeetingAgendas
-            join m in _db.TbMeetingSchedules on a.MeetingRid equals m.Rid
-            where a.Active == "Y" && m.Active == "Y"
-            select new
-            {
-                a.Rid, a.MeetingRid, m.MeetingSubject, m.MeetingDate, a.MemberRids, a.AgendaDueDt, a.AgendaStatus
-            };
+        var today = DateOnly.FromDateTime(DateTime.Today);
+
+        var officerId = scope?.RequestedOfficerId
+            ?? (scope?.IsOfficer == true ? scope.OfficerLoginId : null);
+
+        if (officerId is int off)
+            scopeRids = new List<int> { off };
+
+        // ============================================================
+        // STEP 1: MEETINGS IN SCOPE
+        // Start from meetings themselves (like GetMeetingsAsync), NOT
+        // from agendas -- so a meeting the officer belongs to still
+        // shows up even with zero/no matching agenda points.
+        // ============================================================
+        var meetingQuery = _db.TbMeetingSchedules.Where(m => m.Active == "Y");
 
         if (groupId is not null)
         {
-            var meetingIds = await _db.TbMeetingMappedGroups
+            var groupMeetingIds = await _db.TbMeetingMappedGroups
                 .Where(g => g.GroupRid == groupId && g.Active == "Y")
-                .Select(g => g.MeetingRid).ToListAsync();
-            query = query.Where(r => meetingIds.Contains(r.MeetingRid));
+                .Select(g => g.MeetingRid)
+                .ToListAsync();
+            meetingQuery = meetingQuery.Where(m => groupMeetingIds.Contains(m.Rid));
         }
 
-        var rows = await query.ToListAsync();
-
-        // A scoped login (department or officer) counts only the points involving its own officer(s).
         if (scopeRids is not null)
-            rows = rows.Where(r => ParseRids(r.MemberRids).Any(scopeRids.Contains)).ToList();
+        {
+            meetingQuery = meetingQuery.Where(m =>
+                _db.TbMeetingMembers.Any(mm =>
+                    mm.MeetingRid == m.Rid &&
+                    scopeRids.Contains(mm.MemberRid) &&
+                    (scope!.DeptFilter == null || mm.DepartmentId == scope.DeptFilter)));
+        }
 
-        var evalMap = await PointEvaluator.EvaluateManyAsync(_db,
-            rows.Select(r => new AgendaHeader(r.Rid, r.MemberRids, r.AgendaDueDt, r.AgendaStatus)).ToList(),
-            DateOnly.FromDateTime(DateTime.Today));
+        var meetings = await meetingQuery
+            .Select(m => new { m.Rid, m.MeetingSubject, m.MeetingDate })
+            .ToListAsync();
 
-        return rows
-            .GroupBy(r => new { r.MeetingRid, r.MeetingSubject, r.MeetingDate })
-            .Select(g =>
-            {
-                int total = g.Count(), completed = 0, overdue = 0, inProgress = 0;
-                int od0To7 = 0, od8To30 = 0, od31To60 = 0, od60Plus = 0;
-                var todayNum = DateOnly.FromDateTime(DateTime.Today).DayNumber;
-                foreach (var r in g)
+        if (meetings.Count == 0)
+            return [];
+
+        var meetingIds = meetings.Select(m => m.Rid).ToList();
+
+        // ============================================================
+        // STEP 2: ACTIVE AGENDA POINTS FOR THOSE MEETINGS
+        // ============================================================
+        var agendaRows = await _db.TbMeetingAgendas
+            .Where(a => a.Active == "Y" && meetingIds.Contains(a.MeetingRid))
+            .Select(a => new { a.Rid, a.MeetingRid, a.MemberRids, a.AgendaDueDt, a.AgendaStatus })
+            .ToListAsync();
+
+        if (scopeRids is not null)
+        {
+            agendaRows = agendaRows
+                .Where(r => ParseRids(r.MemberRids).Any(scopeRids.Contains))
+                .ToList();
+        }
+
+        var evalMap = agendaRows.Count == 0
+            ? new Dictionary<long, (string Status, int Progress)>()
+            : await PointEvaluator.EvaluateManyAsync(
+                _db,
+                agendaRows.Select(r =>
                 {
+                    var rids = ParseRids(r.MemberRids);
+                    var scoped = scopeRids is not null ? rids.Where(scopeRids.Contains) : rids;
+                    return new AgendaHeader(r.Rid, string.Join(",", scoped), r.AgendaDueDt, r.AgendaStatus);
+                }).ToList(),
+                today);
+
+        var pointsByMeeting = agendaRows.ToLookup(r => r.MeetingRid);
+        int todayNum = today.DayNumber;
+
+        // ============================================================
+        // STEP 3: BUILD ABSTRACT -- ONE ROW PER MEETING, EVEN 0-POINT
+        // ============================================================
+        return meetings
+            .Select(m =>
+            {
+                int comp = 0, od = 0, prog = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, total = 0;
+
+                foreach (var r in pointsByMeeting[m.Rid])
+                {
+                    total++;
                     switch (evalMap[r.Rid].Status)
                     {
-                        case "Completed": completed++; break;
+                        case "Completed": comp++; break;
                         case "OverDue":
-                            overdue++;
-                            // OverDue implies a due date in the past, so bucket by days elapsed since it.
-                            var days = r.AgendaDueDt is DateOnly due ? todayNum - due.DayNumber : 0;
-                            if (days <= 7) od0To7++;
-                            else if (days <= 30) od8To30++;
-                            else if (days <= 60) od31To60++;
-                            else od60Plus++;
+                            od++;
+                            int days = r.AgendaDueDt is DateOnly d ? todayNum - d.DayNumber : 0;
+                            if (days <= 7) b1++;
+                            else if (days <= 30) b2++;
+                            else if (days <= 60) b3++;
+                            else b4++;
                             break;
-                        default: inProgress++; break;
+                        default: prog++; break;
                     }
                 }
+
                 return new MeetingAbstractDto(
-                    g.Key.MeetingRid, g.Key.MeetingSubject, g.Key.MeetingDate,
-                    total, completed, inProgress, overdue,
-                    od0To7, od8To30, od31To60, od60Plus,
-                    MeetingScoreHelper.Compute(total, completed, inProgress, overdue));
+                    m.Rid, m.MeetingSubject, m.MeetingDate,
+                    total, comp, prog, od, b1, b2, b3, b4,
+                    MeetingScoreHelper.Compute(total, comp, prog, od));
             })
             .OrderByDescending(a => a.MeetingDate)
             .ToList();
     }
-
-    // Per-department performance: every action point is credited to each department that has an
-    // officer responsible for it (a point spanning two departments counts once for each). The
-    // completion rate drives the top/worst-performing ranking on the dashboard.
-    // Per-department performance for the admin Department Dashboard. Every number in a row — the
-    // Total/Completed/InProgress/OverDue counts, the CompletionRate, and the accumulated Score — is
-    // derived from the SAME completion signal the whole app uses (AgendaStatusHelper: the stored
-    // status flag + due date, not raw ATR progress which is blank on legacy backfilled points). The
-    // accumulated score is the average of the department's per-meeting scores. A point spanning two
-    // departments is credited to each.
     public async Task<List<DepartmentStatDto>> GetDepartmentStatsAsync(long? groupId = null, ScopeRequest? scope = null)
     {
         var scopeRids = await ScopeResolver.ResolveRidsAsync(_db, scope);
@@ -490,6 +541,21 @@ public class DashboardService
         if (string.IsNullOrWhiteSpace(csv)) yield break;
         foreach (var part in csv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
             if (int.TryParse(part, out var n)) yield return n;
+    }
+    private static int? DeptForOfficer(string? departmentIds, int officerId)
+    {
+        if (string.IsNullOrWhiteSpace(departmentIds)) return null;
+        foreach (var part in departmentIds.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var bits = part.Split(':');
+            if (bits.Length >= 2
+                && int.TryParse(bits[0], out var rid) && rid == officerId
+                && int.TryParse(bits[1], out var dept))
+            {
+                return dept;
+            }
+        }
+        return null;
     }
 
     private static DashboardPointDto ToPoint(AgendaRow r, DateOnly today, string status,

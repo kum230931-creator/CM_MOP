@@ -1070,16 +1070,13 @@ public class AgendasService
 
     // Overdue, due-today and upcoming (next 3 days) action points for a scoped login (department or
     // officer) — drives the login notification. DueDays = today - dueDate, so >= -3 covers the next 3 days too.
-    public async Task<List<ActionablePointDto>> GetMyDuePointsAsync(ScopeRequest? scope = null)
-    {
-        var all = await GetAllActionablePointsAsync(null, scope);
-        return all
-            .Where(p => p.AgendaDueDt is not null
-                        && !string.Equals(p.Status, "Completed", StringComparison.OrdinalIgnoreCase)
-                        && p.DueDays >= -3)
-            .OrderByDescending(p => p.DueDays)
-            .ToList();
-    }
+    public async Task<List<ActionablePointDto>> GetMyDuePointsAsync(ScopeRequest? scope = null) =>
+    (await GetAllActionablePointsAsync(null, scope))
+        .Where(p => p.AgendaDueDt is not null
+                    && !string.Equals(p.Status, "Completed", StringComparison.OrdinalIgnoreCase)
+                    && p.DueDays >= -3)
+        .OrderByDescending(p => p.DueDays)
+        .ToList();
 
     public async Task<List<ActionablePointDto>> GetAllActionablePointsAsync(
         string? statusFilter = null,
@@ -1088,42 +1085,26 @@ public class AgendasService
         var scopeRids = await ScopeResolver.ResolveRidsAsync(_db, scope);
         var today = DateOnly.FromDateTime(DateTime.Today);
 
-        // ------------------------------------------------------------
-        // Coarse pre-filter
-        // ------------------------------------------------------------
-        // If a specific officer is requested, only meetings containing
-        // that officer are considered.
-        //
-        // Otherwise, existing scope-based filtering remains unchanged.
-        // ------------------------------------------------------------
+        // NORMAL OFFICER:
+        // Only the logged-in officer's own RID should be considered.
+        // Same override as LoadAsync / CountMeetingsAsync / GetMeetingAbstractAsync.
+        // Without this, ScopeResolver's broader set leaked in and unrelated
+        // points/notifications showed up for a plain officer login.
+        if (scope?.IsOfficer == true && scope.OfficerLoginId is int loginOfficerId)
+            scopeRids = new List<int> { loginOfficerId };
 
-        var agendaQuery = _db.TbMeetingAgendas
-            .Where(a => a.Active == "Y");
+        var agendaQuery = _db.TbMeetingAgendas.Where(a => a.Active == "Y");
 
-        if (scope?.RequestedOfficerId is int requestedOfficerId)
-        {
+        if (scope?.RequestedOfficerId is int reqId)
             agendaQuery = agendaQuery.Where(a =>
-                _db.TbMeetingMembers.Any(mm =>
-                    mm.MeetingRid == a.MeetingRid &&
-                    mm.MemberRid == requestedOfficerId));
-        }
+                _db.TbMeetingMembers.Any(mm => mm.MeetingRid == a.MeetingRid && mm.MemberRid == reqId));
         else if (scopeRids is not null)
-        {
             agendaQuery = agendaQuery.Where(a =>
-                _db.TbMeetingMembers.Any(mm =>
-                    mm.MeetingRid == a.MeetingRid &&
-                    scopeRids.Contains(mm.MemberRid)));
-        }
-
-
-        // ------------------------------------------------------------
-        // Load agenda records
-        // ------------------------------------------------------------
+                _db.TbMeetingMembers.Any(mm => mm.MeetingRid == a.MeetingRid && scopeRids.Contains(mm.MemberRid)));
 
         var rows = await (
             from a in agendaQuery
-            join m in _db.TbMeetingSchedules
-                on a.MeetingRid equals m.Rid
+            join m in _db.TbMeetingSchedules on a.MeetingRid equals m.Rid
             orderby m.MeetingDate descending, a.Rid
             select new
             {
@@ -1140,135 +1121,41 @@ public class AgendasService
                 a.AgendaStatus,
                 a.IsOfficerCalled,
                 a.OfficerRemark,
+                RemarksCount = _db.TbRemarksOnAgendas.Count(r => r.AgendaRid == a.Rid)
+            }).ToListAsync();
 
-                RemarksCount = _db.TbRemarksOnAgendas
-                    .Count(r => r.AgendaRid == a.Rid)
-            })
-            .ToListAsync();
-
-
-        // ------------------------------------------------------------
-        // Precise per-point filter
-        // ------------------------------------------------------------
-        // IMPORTANT:
-        //
-        // If officerId is specified:
-        //      ONLY that officer's action points.
-        //
-        // Otherwise:
-        //      Existing scope-based filtering.
-        // ------------------------------------------------------------
-
-        if (scope?.RequestedOfficerId is int officerId)
-        {
-            rows = rows
-                .Where(a =>
-                    ParseRids(a.MemberRids)
-                        .Contains(officerId))
-                .ToList();
-        }
-        else if (scopeRids is not null)
-        {
-            rows = rows
-                .Where(a =>
-                    ParseRids(a.MemberRids)
-                        .Any(scopeRids.Contains))
-                .ToList();
-        }
-
-
-        // ------------------------------------------------------------
-        // Existing evaluator
-        // ------------------------------------------------------------
+        rows = scope?.RequestedOfficerId is int offId
+            ? rows.Where(a => ParseRids(a.MemberRids).Contains(offId)).ToList()
+            : (scopeRids is not null
+                ? rows.Where(a => ParseRids(a.MemberRids).Any(scopeRids.Contains)).ToList()
+                : rows);
 
         var evalMap = await PointEvaluator.EvaluateManyAsync(
             _db,
-            rows.Select(a => new AgendaHeader(
-                a.Rid,
-                a.MemberRids,
-                a.AgendaDueDt,
-                a.AgendaStatus
-            )).ToList(),
+            rows.Select(a => new AgendaHeader(a.Rid, a.MemberRids, a.AgendaDueDt, a.AgendaStatus)).ToList(),
             today);
 
+        foreach (var a in rows.Where(a => string.Equals(a.AgendaStatus, "Completed", StringComparison.OrdinalIgnoreCase)))
+            evalMap[a.Rid] = ("Completed", 100);
 
-        // ------------------------------------------------------------
-        // Existing local correction
-        // ------------------------------------------------------------
-
-        foreach (var a in rows)
-        {
-            if (string.Equals(
-                    a.AgendaStatus,
-                    "Completed",
-                    StringComparison.OrdinalIgnoreCase))
-            {
-                evalMap[a.Rid] = ("Completed", 100);
-            }
-        }
-
-
-        // ------------------------------------------------------------
-        // Load officer contacts
-        // ------------------------------------------------------------
-
-        var contacts = await OfficerContacts.LoadAsync(
-            _db,
-            rows.Select(a => a.MemberRids));
-
-
-        // ------------------------------------------------------------
-        // Map to existing response DTO
-        // ------------------------------------------------------------
+        var contacts = await OfficerContacts.LoadAsync(_db, rows.Select(a => a.MemberRids));
 
         var mapped = rows.Select(a =>
         {
             var (status, progress) = evalMap[a.Rid];
-
             return new ActionablePointDto(
-                a.Rid,
-                a.MeetingRid,
-                a.MeetingSubject ?? "",
-                a.MeetingDate,
-                a.MeetingPlace,
-                a.MeetingAgenda,
-                a.AgendaMembers,
-                a.DistrictName,
-                a.AgendaDueDt,
-
-                a.AgendaDueDt is null
-                    ? 0
-                    : today.DayNumber - a.AgendaDueDt.Value.DayNumber,
-
-                status,
-                a.RemarksCount,
-                progress,
-
-                OfficerContacts.Resolve(
-                    a.MemberRids,
-                    a.AgendaMembers,
-                    contacts),
-
-                a.IsOfficerCalled,
-                a.OfficerRemark
-            );
+                a.Rid, a.MeetingRid, a.MeetingSubject ?? "", a.MeetingDate, a.MeetingPlace,
+                a.MeetingAgenda, a.AgendaMembers, a.DistrictName, a.AgendaDueDt,
+                a.AgendaDueDt is null ? 0 : today.DayNumber - a.AgendaDueDt.Value.DayNumber,
+                status, a.RemarksCount, progress,
+                OfficerContacts.Resolve(a.MemberRids, a.AgendaMembers, contacts),
+                a.IsOfficerCalled, a.OfficerRemark);
         });
 
-
-        // ------------------------------------------------------------
-        // Apply status filter AFTER evaluation
-        // ------------------------------------------------------------
-
-        if (!string.IsNullOrWhiteSpace(statusFilter))
-        {
-            mapped = mapped.Where(p =>
-                string.Equals(
-                    p.Status,
-                    statusFilter,
-                    StringComparison.OrdinalIgnoreCase));
-        }
-
-        return mapped.ToList();
+        return (string.IsNullOrWhiteSpace(statusFilter)
+            ? mapped
+            : mapped.Where(p => string.Equals(p.Status, statusFilter, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
     }
 
 
