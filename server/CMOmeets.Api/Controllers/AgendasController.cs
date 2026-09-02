@@ -15,13 +15,28 @@ public class AgendasController(AgendasService svc) : ApiControllerBase
     public async Task<IActionResult> AllPoints([FromQuery] string? status, [FromQuery] int? deptId = null, [FromQuery] int? officerId = null)
         => Ok(await svc.GetAllActionablePointsAsync(status, Scope(deptId, officerId)));
 
-    // Single action point detail (drives the /action-point/:id page).
     [HttpGet("{id:long}")]
-    public async Task<IActionResult> GetOne(long id)
+    public async Task<IActionResult> GetOne(
+    long id,
+    [FromQuery] int? deptId = null,
+    [FromQuery] int? officerId = null)
     {
-        var a = await svc.GetAgendaAsync(id, Scope());
-        return a is null ? NotFound() : Ok(a);
+        var a = await svc.GetAgendaAsync(
+            id,
+            Scope(deptId, officerId));
+
+        return a is null
+            ? NotFound()
+            : Ok(a);
     }
+    //Edited by Developer
+    // Single action point detail (drives the /action-point/:id page).
+    //[HttpGet("{id:long}")]
+    //public async Task<IActionResult> GetOne(long id)
+    //{
+    //    var a = await svc.GetAgendaAsync(id, Scope());
+    //    return a is null ? NotFound() : Ok(a);
+    //}
 
     [HttpPost]
     [Authorize(Roles = "admin,officer,cmo_officer,nodal")]
