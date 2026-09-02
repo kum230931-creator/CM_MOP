@@ -13,8 +13,8 @@ public class MeetingsService
 
 
     public async Task<List<MeetingListDto>> GetMeetingsAsync(
-       bool includeInactive = false,
-       ScopeRequest? scope = null)
+      bool includeInactive = false,
+      ScopeRequest? scope = null)
     {
         // Resolve the normal scope first.
         var scopeRids = await ScopeResolver.ResolveRidsAsync(_db, scope);
@@ -101,6 +101,10 @@ public class MeetingsService
             }
         ).ToListAsync();
 
+        // Keep all valid/active meeting members separately.
+        // This will be used for TOTAL member count.
+        var allMeetingMembers = members;
+
         // ============================================================
         // AGENDAS
         // ============================================================
@@ -143,7 +147,10 @@ public class MeetingsService
         // ============================================================
         // MEMBER COUNTS
         // ============================================================
-        var memberCounts = members
+        // IMPORTANT:
+        // Count from ALL valid/active meeting members, not the
+        // officer-scoped 'members' list.
+        var memberCounts = allMeetingMembers
             .GroupBy(mm => mm.MeetingRid)
             .ToDictionary(
                 g => g.Key,
@@ -319,7 +326,7 @@ public class MeetingsService
                     m.MeetingSubject,
                     m.HasDoc,
 
-                    // Count only valid/active officers.
+                    // Count TOTAL valid/active officers in the meeting.
                     memberCounts.GetValueOrDefault(m.Rid),
 
                     total,

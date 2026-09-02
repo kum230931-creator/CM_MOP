@@ -318,6 +318,11 @@ public class MastersService
             || string.Equals(remark.RemarkStatus, "Completed", StringComparison.OrdinalIgnoreCase);
     }
 
+    // True if the WHOLE agenda is already closed at the header level (tb_meetingAgendas.agendaStatus).
+    // This protects every officer on the agenda, even ones with no row yet in tb_remarksOnAgendas.
+    private static bool IsAgendaHeaderComplete(TbMeetingAgenda agenda) =>
+        string.Equals(agenda.AgendaStatus, "Completed", StringComparison.OrdinalIgnoreCase);
+
     // Blanks oldOfficerId's reference (in DepartmentIDs triples, and permanently in
     // tb_meetingMembers) wherever they held (deptId, desigId), for every non-completed
     // agenda. The (dept, desig) part of the tb_meetingAgendas triple is kept as
@@ -336,6 +341,11 @@ public class MastersService
         {
             var triples = ParseChargeTriples(agenda.DepartmentIDs);
             if (!triples.Any(t => t.OfficerRid == oldOfficerId && t.DeptId == deptId && t.DesigId == desigId))
+                continue;
+
+            // Whole agenda already closed at header level — protects everyone on it, even
+            // an officer with no tb_remarksOnAgendas row yet.
+            if (IsAgendaHeaderComplete(agenda))
                 continue;
 
             // This officer already completed their own part of THIS agenda — leave it as history.
@@ -397,6 +407,10 @@ public class MastersService
         {
             var triples = ParseChargeTriples(agenda.DepartmentIDs);
             if (!triples.Any(t => t.OfficerRid == 0 && t.DeptId == deptId && t.DesigId == desigId))
+                continue;
+
+            // Don't auto-assign a new officer into a slot on an agenda that's already closed.
+            if (IsAgendaHeaderComplete(agenda))
                 continue;
 
             var updated = triples
