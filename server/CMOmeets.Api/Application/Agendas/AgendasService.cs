@@ -1041,32 +1041,39 @@ public class AgendasService
         var scopeRids = await ScopeResolver.ResolveRidsAsync(_db, scope);
         var today = DateOnly.FromDateTime(DateTime.Today);
 
-        // NORMAL OFFICER:
+        // NORMAL OFFICER, no department picked in the title bar:
         // Only the logged-in officer's own RID should be considered.
         // Same override as LoadAsync / CountMeetingsAsync / GetMeetingAbstractAsync.
         // Without this, ScopeResolver's broader set leaked in and unrelated
         // points/notifications showed up for a plain officer login.
-        if (scope?.IsOfficer == true && scope.OfficerLoginId is int loginOfficerId)
+        // BUT when the officer HAS picked a department (RequestedDeptId set, e.g. the
+        // title-bar "AMRUT" filter), trust ScopeResolver's result instead — it already
+        // scopes to that department's officers (only if that dept is one of the
+        // officer's own depts), which is exactly what the title-bar filter should do.
+        // Previously this override fired unconditionally and silently ignored the
+        // picked department, so switching the dropdown never changed the list.
+        //if (scope?.IsOfficer == true && scope.OfficerLoginId is int loginOfficerId && scope.RequestedDeptId is null)
+        //    scopeRids = new List<int> { loginOfficerId };
+        if (scope?.IsOfficer == true && scope.OfficerLoginId is int loginOfficerId && scope.DeptFilter is null)
             scopeRids = new List<int> { loginOfficerId };
 
         var agendaQuery = _db.TbMeetingAgendas.Where(a => a.Active == "Y");
 
         // NOTE: tb_meetingMembers.MemberRid gets zeroed out on officer transfer (by design —
-        // that blanking process is not being changed). But a completed agenda's MemberRids
-        // CSV snapshot on tb_meetingAgendas is deliberately left untouched for completed work
-        // (see "don't touch if complete" rule). If we only filter via TbMeetingMembers here,
-        // a transferred officer's completed history gets dropped from the SQL fetch before it
-        // ever reaches the in-memory ParseRids(a.MemberRids) re-filter below. So we also match
-        // on a.MemberRids as a broad OR pre-filter (string.Contains can be slightly over-inclusive,
-        // e.g. "9" matching "94" — that's fine, the exact match happens in the ParseRids step below).
+        // that blanking process itself is NOT being changed). For a COMPLETED agenda, the
+        // MemberRids CSV snapshot on tb_meetingAgendas is deliberately left untouched (per the
+        // "don't touch if complete" rule), so we fall back to matching a.MemberRids ONLY when
+        // AgendaStatus == "Completed" — otherwise pending/in-progress agendas whose officer has
+        // since transferred out would leak back into department-scoped views, breaking dept
+        // filtering. The completed-only guard keeps that from happening.
         if (scope?.RequestedOfficerId is int reqId)
             agendaQuery = agendaQuery.Where(a =>
                 _db.TbMeetingMembers.Any(mm => mm.MeetingRid == a.MeetingRid && mm.MemberRid == reqId)
-                || a.MemberRids.Contains(reqId.ToString()));
+                || (a.AgendaStatus == "Completed" && a.MemberRids.Contains(reqId.ToString())));
         else if (scopeRids is not null)
             agendaQuery = agendaQuery.Where(a =>
                 _db.TbMeetingMembers.Any(mm => mm.MeetingRid == a.MeetingRid && scopeRids.Contains(mm.MemberRid))
-                || scopeRids.Any(id => a.MemberRids.Contains(id.ToString())));
+                || (a.AgendaStatus == "Completed" && scopeRids.Any(id => a.MemberRids.Contains(id.ToString()))));
 
         var rows = await (
             from a in agendaQuery
@@ -1123,7 +1130,6 @@ public class AgendasService
             : mapped.Where(p => string.Equals(p.Status, statusFilter, StringComparison.OrdinalIgnoreCase)))
             .ToList();
     }
-
     // ---------- All actionable points (cross-meeting) ----------
     //public async Task<List<ActionablePointDto>> GetAllActionablePointsAsync(string? statusFilter = null, ScopeRequest? scope = null)
     //{
