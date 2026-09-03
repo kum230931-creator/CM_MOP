@@ -142,21 +142,7 @@ public class DashboardService
 
     // Count active meetings. A meeting is counted even before it has any action points;
     // for a department login only meetings that include one of its officers are counted.
-    //private async Task<int> CountMeetingsAsync(long? groupId, ScopeRequest? scope)
-    //{
-    //    var scopeRids = await ScopeResolver.ResolveRidsAsync(_db, scope);
-    //    var query = _db.TbMeetingSchedules.Where(m => m.Active == "Y");
-    //    if (groupId is not null)
-    //    {
-    //        var meetingIds = await _db.TbMeetingMappedGroups
-    //            .Where(g => g.GroupRid == groupId && g.Active == "Y")
-    //            .Select(g => g.MeetingRid).ToListAsync();
-    //        query = query.Where(m => meetingIds.Contains(m.Rid));
-    //    }
-    //    if (scopeRids is not null)
-    //        query = query.Where(m => _db.TbMeetingMembers.Any(mm => mm.MeetingRid == m.Rid && scopeRids.Contains(mm.MemberRid)));
-    //    return await query.CountAsync();
-    //}
+    
     private async Task<int> CountMeetingsAsync(
     long? groupId,
     ScopeRequest? scope)

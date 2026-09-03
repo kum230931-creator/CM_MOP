@@ -302,50 +302,6 @@ public class AgendasService
             .ToList();
     }
 
-
-    // Single action point by id, scope-checked — drives the action-point detail page.
-    //public async Task<AgendaDto?> GetAgendaAsync(long id, ScopeRequest? scope = null)
-    //{
-    //    var scopeRids = await ScopeResolver.ResolveRidsAsync(_db, scope);
-    //    var a = await _db.TbMeetingAgendas
-    //        .Where(x => x.Rid == id && x.Active == "Y")
-    //        .Select(x => new
-    //        {
-    //            x.Rid, x.MeetingRid, x.MeetingAgenda, x.AgendaMembers, x.MemberRids,
-    //            x.AgendaDueDt, x.DistrictName, x.AgendaStatus, x.AddedAt,
-    //            x.IsOfficerCalled, x.OfficerRemark,
-    //            RemarksCount = _db.TbRemarksOnAgendas.Count(r => r.AgendaRid == x.Rid),
-    //            Opened = _db.TbActionPointViews.Any(v => v.AgendaRid == x.Rid),
-    //            FirstViewedAt = _db.TbActionPointViews
-    //                .Where(v => v.AgendaRid == x.Rid).Min(v => (DateTime?)v.FirstViewedAt),
-    //            LastViewedAt = _db.TbActionPointViews
-    //                .Where(v => v.AgendaRid == x.Rid).Max(v => (DateTime?)v.LastViewedAt),
-    //            ViewedBy = _db.TbActionPointViews
-    //                .Where(v => v.AgendaRid == x.Rid)
-    //                .OrderByDescending(v => v.LastViewedAt)
-    //                .Select(v => v.ViewedBy)
-    //                .FirstOrDefault()
-    //        })
-    //        .FirstOrDefaultAsync();
-    //    if (a is null) return null;
-    //    // A scoped login (dept/officer) may only open action points involving one of its own officers.
-    //    if (scopeRids is not null && !ParseRids(a.MemberRids).Any(scopeRids.Contains)) return null;
-    //    var atrs = await _db.TbRemarksOnAgendas
-    //        .Where(r => r.AgendaRid == a.Rid)
-    //        .Select(r => new AtrRow(r.MemberRid, r.Rid, r.ProgressPercentage, r.RemarkStatus))
-    //        .ToListAsync();
-    //    var (status, progress) = PointEvaluator.Evaluate(
-    //        PointEvaluator.ParseRids(a.MemberRids).ToList(), atrs, a.AgendaDueDt, a.AgendaStatus,
-    //        DateOnly.FromDateTime(DateTime.Today));
-    //    var contacts = await OfficerContacts.LoadAsync(_db, new[] { a.MemberRids });
-    //    return new AgendaDto(
-    //        a.Rid, a.MeetingRid, a.MeetingAgenda, a.AgendaMembers, a.MemberRids,
-    //        a.AgendaDueDt, a.DistrictName, status,
-    //        a.RemarksCount, progress, a.AddedAt,
-    //        a.Opened, a.FirstViewedAt, a.LastViewedAt, a.ViewedBy,
-    //        OfficerContacts.Resolve(a.MemberRids, a.AgendaMembers, contacts),
-    //        a.IsOfficerCalled, a.OfficerRemark);
-    //}
     public async Task<AgendaDto?> GetAgendaAsync(
     long id,
     ScopeRequest? scope = null)
@@ -1095,12 +1051,22 @@ public class AgendasService
 
         var agendaQuery = _db.TbMeetingAgendas.Where(a => a.Active == "Y");
 
+        // NOTE: tb_meetingMembers.MemberRid gets zeroed out on officer transfer (by design —
+        // that blanking process is not being changed). But a completed agenda's MemberRids
+        // CSV snapshot on tb_meetingAgendas is deliberately left untouched for completed work
+        // (see "don't touch if complete" rule). If we only filter via TbMeetingMembers here,
+        // a transferred officer's completed history gets dropped from the SQL fetch before it
+        // ever reaches the in-memory ParseRids(a.MemberRids) re-filter below. So we also match
+        // on a.MemberRids as a broad OR pre-filter (string.Contains can be slightly over-inclusive,
+        // e.g. "9" matching "94" — that's fine, the exact match happens in the ParseRids step below).
         if (scope?.RequestedOfficerId is int reqId)
             agendaQuery = agendaQuery.Where(a =>
-                _db.TbMeetingMembers.Any(mm => mm.MeetingRid == a.MeetingRid && mm.MemberRid == reqId));
+                _db.TbMeetingMembers.Any(mm => mm.MeetingRid == a.MeetingRid && mm.MemberRid == reqId)
+                || a.MemberRids.Contains(reqId.ToString()));
         else if (scopeRids is not null)
             agendaQuery = agendaQuery.Where(a =>
-                _db.TbMeetingMembers.Any(mm => mm.MeetingRid == a.MeetingRid && scopeRids.Contains(mm.MemberRid)));
+                _db.TbMeetingMembers.Any(mm => mm.MeetingRid == a.MeetingRid && scopeRids.Contains(mm.MemberRid))
+                || scopeRids.Any(id => a.MemberRids.Contains(id.ToString())));
 
         var rows = await (
             from a in agendaQuery
@@ -1157,7 +1123,6 @@ public class AgendasService
             : mapped.Where(p => string.Equals(p.Status, statusFilter, StringComparison.OrdinalIgnoreCase)))
             .ToList();
     }
-
 
     // ---------- All actionable points (cross-meeting) ----------
     //public async Task<List<ActionablePointDto>> GetAllActionablePointsAsync(string? statusFilter = null, ScopeRequest? scope = null)
