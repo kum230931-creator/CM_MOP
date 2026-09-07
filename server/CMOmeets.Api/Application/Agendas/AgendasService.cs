@@ -1041,31 +1041,12 @@ public class AgendasService
         var scopeRids = await ScopeResolver.ResolveRidsAsync(_db, scope);
         var today = DateOnly.FromDateTime(DateTime.Today);
 
-        // NORMAL OFFICER, no department picked in the title bar:
-        // Only the logged-in officer's own RID should be considered.
-        // Same override as LoadAsync / CountMeetingsAsync / GetMeetingAbstractAsync.
-        // Without this, ScopeResolver's broader set leaked in and unrelated
-        // points/notifications showed up for a plain officer login.
-        // BUT when the officer HAS picked a department (RequestedDeptId set, e.g. the
-        // title-bar "AMRUT" filter), trust ScopeResolver's result instead — it already
-        // scopes to that department's officers (only if that dept is one of the
-        // officer's own depts), which is exactly what the title-bar filter should do.
-        // Previously this override fired unconditionally and silently ignored the
-        // picked department, so switching the dropdown never changed the list.
-        //if (scope?.IsOfficer == true && scope.OfficerLoginId is int loginOfficerId && scope.RequestedDeptId is null)
-        //    scopeRids = new List<int> { loginOfficerId };
-        if (scope?.IsOfficer == true && scope.OfficerLoginId is int loginOfficerId && scope.DeptFilter is null)
+        if (scope?.IsOfficer == true && scope.OfficerLoginId is int loginOfficerId)
             scopeRids = new List<int> { loginOfficerId };
 
         var agendaQuery = _db.TbMeetingAgendas.Where(a => a.Active == "Y");
 
-        // NOTE: tb_meetingMembers.MemberRid gets zeroed out on officer transfer (by design —
-        // that blanking process itself is NOT being changed). For a COMPLETED agenda, the
-        // MemberRids CSV snapshot on tb_meetingAgendas is deliberately left untouched (per the
-        // "don't touch if complete" rule), so we fall back to matching a.MemberRids ONLY when
-        // AgendaStatus == "Completed" — otherwise pending/in-progress agendas whose officer has
-        // since transferred out would leak back into department-scoped views, breaking dept
-        // filtering. The completed-only guard keeps that from happening.
+        
         if (scope?.RequestedOfficerId is int reqId)
             agendaQuery = agendaQuery.Where(a =>
                 _db.TbMeetingMembers.Any(mm => mm.MeetingRid == a.MeetingRid && mm.MemberRid == reqId)
@@ -1098,23 +1079,22 @@ public class AgendasService
                 RemarksCount = _db.TbRemarksOnAgendas.Count(r => r.AgendaRid == a.Rid)
             }).ToListAsync();
 
-        //rows = scope?.RequestedOfficerId is int offId
-        //    ? rows.Where(a => ParseRids(a.MemberRids).Contains(offId)).ToList()
-        //    : (scopeRids is not null
-        //        ? rows.Where(a => ParseRids(a.MemberRids).Any(scopeRids.Contains)).ToList()
-        //        : rows);
+  
+       
         rows = scope?.RequestedOfficerId is int offId
-    ? rows.Where(a => ParseRids(a.MemberRids).Contains(offId)).ToList()
-    : (scope?.DeptFilter is int deptFilterId
+            ? rows.Where(a => ParseRids(a.MemberRids).Contains(offId)).ToList()
+            : (scope?.DeptFilter is int deptFilterId
+                ? rows.Where(a => AgendaMatchesDept(a.DepartmentIDs, a.MemberRids, deptFilterId, scopeRids)).ToList()
+                : (scopeRids is not null
+                    ? rows.Where(a => ParseRids(a.MemberRids).Any(scopeRids.Contains)).ToList()
+                    : rows));
+        
         // A department has been picked (title-bar filter, e.g. "AMRUT"): match on the
         // department the officer was actually representing IN THAT MEETING (DepartmentIDs
         // snapshot), not their current/global department. Prevents an officer who belongs
         // to multiple departments (e.g. rid 94 -> dept 8 AND dept 114) from leaking agendas
         // of unrelated meetings into a specific department's filtered view.
-        ? rows.Where(a => AgendaMatchesDept(a.DepartmentIDs, a.MemberRids, deptFilterId, scopeRids)).ToList()
-        : (scopeRids is not null
-            ? rows.Where(a => ParseRids(a.MemberRids).Any(scopeRids.Contains)).ToList()
-            : rows));
+        
 
         var evalMap = await PointEvaluator.EvaluateManyAsync(
             _db,
@@ -1255,14 +1235,17 @@ public class AgendasService
             foreach (var part in departmentIds.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
             {
                 var pieces = part.Split(':');
-                if (pieces.Length == 3 && int.TryParse(pieces[1], out var did) && did == deptId)
+                if (pieces.Length != 3) continue;
+                if (!int.TryParse(pieces[0], out var officerId)) continue;
+                if (!int.TryParse(pieces[1], out var did)) continue;
+                if (did != deptId) continue;
+
+                if (scopeRids is null || scopeRids.Contains(officerId))
                     return true;
             }
             return false;
         }
 
-        // Legacy rows created before DepartmentIDs existed: fall back to old officer-rid match
-        // so old data doesn't silently disappear from every department filter.
         return scopeRids is not null && ParseRids(memberRids).Any(scopeRids.Contains);
     }
 
