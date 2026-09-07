@@ -1089,6 +1089,7 @@ public class AgendasService
                 a.MeetingAgenda,
                 a.AgendaMembers,
                 a.MemberRids,
+                a.DepartmentIDs,
                 a.DistrictName,
                 a.AgendaDueDt,
                 a.AgendaStatus,
@@ -1097,11 +1098,23 @@ public class AgendasService
                 RemarksCount = _db.TbRemarksOnAgendas.Count(r => r.AgendaRid == a.Rid)
             }).ToListAsync();
 
+        //rows = scope?.RequestedOfficerId is int offId
+        //    ? rows.Where(a => ParseRids(a.MemberRids).Contains(offId)).ToList()
+        //    : (scopeRids is not null
+        //        ? rows.Where(a => ParseRids(a.MemberRids).Any(scopeRids.Contains)).ToList()
+        //        : rows);
         rows = scope?.RequestedOfficerId is int offId
-            ? rows.Where(a => ParseRids(a.MemberRids).Contains(offId)).ToList()
-            : (scopeRids is not null
-                ? rows.Where(a => ParseRids(a.MemberRids).Any(scopeRids.Contains)).ToList()
-                : rows);
+    ? rows.Where(a => ParseRids(a.MemberRids).Contains(offId)).ToList()
+    : (scope?.DeptFilter is int deptFilterId
+        // A department has been picked (title-bar filter, e.g. "AMRUT"): match on the
+        // department the officer was actually representing IN THAT MEETING (DepartmentIDs
+        // snapshot), not their current/global department. Prevents an officer who belongs
+        // to multiple departments (e.g. rid 94 -> dept 8 AND dept 114) from leaking agendas
+        // of unrelated meetings into a specific department's filtered view.
+        ? rows.Where(a => AgendaMatchesDept(a.DepartmentIDs, a.MemberRids, deptFilterId, scopeRids)).ToList()
+        : (scopeRids is not null
+            ? rows.Where(a => ParseRids(a.MemberRids).Any(scopeRids.Contains)).ToList()
+            : rows));
 
         var evalMap = await PointEvaluator.EvaluateManyAsync(
             _db,
@@ -1229,6 +1242,28 @@ public class AgendasService
         if (string.IsNullOrWhiteSpace(csv)) yield break;
         foreach (var part in csv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
             if (int.TryParse(part, out var n)) yield return n;
+    }
+    // Matches an agenda against a specific department using the per-agenda department
+    // snapshot captured at create/update time (DepartmentIDs: "officerId:deptId:desigId,...").
+    // This reflects which department the officer represented IN THAT MEETING — not their
+    // current global department mapping — so a title-bar department filter only returns
+    // agendas that actually belong to that department.
+    private static bool AgendaMatchesDept(string? departmentIds, string? memberRids, int deptId, List<int>? scopeRids)
+    {
+        if (!string.IsNullOrWhiteSpace(departmentIds))
+        {
+            foreach (var part in departmentIds.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                var pieces = part.Split(':');
+                if (pieces.Length == 3 && int.TryParse(pieces[1], out var did) && did == deptId)
+                    return true;
+            }
+            return false;
+        }
+
+        // Legacy rows created before DepartmentIDs existed: fall back to old officer-rid match
+        // so old data doesn't silently disappear from every department filter.
+        return scopeRids is not null && ParseRids(memberRids).Any(scopeRids.Contains);
     }
 
     private async Task<(string names, string rids)> BuildMemberCsvAsync(List<int> officerIds)
