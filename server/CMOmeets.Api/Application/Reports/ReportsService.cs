@@ -21,10 +21,16 @@ public class ReportsService
     ScopeRequest? scope = null)
     {
         // Resolve scope first.
-        // For a normal officer, we override the resolved department-based
-        // RIDs with ONLY the logged-in officer's own RID.
         //
-        // Nodal / CMO continues to use the existing department-scope logic.
+        // Normal officer:
+        //     Only logged-in officer's own RID.
+        //
+        // Nodal:
+        //     Meetings will be filtered by NodalDeptId
+        //     using TbMeetingMembers.DepartmentId.
+        //
+        // CMO / other scoped users:
+        //     Existing scope-based logic remains unchanged.
         List<int>? scopeOfficerRids =
             await ScopeResolver.ResolveRidsAsync(_db, scope);
 
@@ -35,11 +41,27 @@ public class ReportsService
             scopeOfficerRids = new List<int> { officerId };
         }
 
-        // Resolve meetings belonging to the scoped officer(s).
+        // Resolve meetings according to login type.
         List<int>? scopeMeetingIds = null;
 
-        if (scopeOfficerRids is not null)
+        if (scope?.IsNodal == true && scope.NodalDeptId.HasValue)
         {
+            // NODAL:
+            // Only meetings where at least one valid member
+            // belongs to the nodal officer's department.
+            scopeMeetingIds = await _db.TbMeetingMembers
+                .Where(mm =>
+                    mm.DepartmentId == scope.NodalDeptId.Value &&
+                    mm.MemberRid != 0 &&
+                    mm.DesignationId != 0)
+                .Select(mm => mm.MeetingRid)
+                .Distinct()
+                .ToListAsync();
+        }
+        else if (scopeOfficerRids is not null)
+        {
+            // EXISTING LOGIC:
+            // Normal officer / CMO / other scoped users.
             scopeMeetingIds = await _db.TbMeetingMembers
                 .Where(mm =>
                     scopeOfficerRids.Contains(mm.MemberRid) &&
@@ -50,7 +72,7 @@ public class ReportsService
                 .ToListAsync();
         }
 
-        // Get active meetings within the requested date range.
+        // Get active meetings within requested date range.
         var meetingsQuery = _db.TbMeetingSchedules
             .Where(m =>
                 m.Active == "Y" &&
@@ -98,8 +120,8 @@ public class ReportsService
 
         // Get valid meeting members only.
         //
-        // MemberRid = 0 OR DesignationId = 0 means the officer is no longer
-        // validly assigned to that meeting (for example, after transfer).
+        // MemberRid = 0 OR DesignationId = 0 means the officer
+        // is no longer validly assigned to that meeting.
         var members = await _db.TbMeetingMembers
             .Where(mm =>
                 meetingIds.Contains(mm.MeetingRid) &&
@@ -108,18 +130,39 @@ public class ReportsService
             .Select(mm => new
             {
                 mm.MeetingRid,
-                mm.MemberRid
+                mm.MemberRid,
+                mm.DepartmentId
             })
             .ToListAsync();
 
-        // For a scoped login, only count its own action points and members.
+        // Apply scoped filtering.
+        //
+        // Nodal:
+        //     Only members belonging to the nodal department.
         //
         // Normal officer:
-        //     scopeOfficerRids = [current officer RID]
+        //     Only logged-in officer.
         //
-        // Nodal / CMO:
-        //     scopeOfficerRids = all officer RIDs in the department scope.
-        if (scopeOfficerRids is not null)
+        // CMO / other scoped users:
+        //     Existing officer-RID based filtering.
+        if (scope?.IsNodal == true && scope.NodalDeptId.HasValue)
+        {
+            var nodalDeptId = scope.NodalDeptId.Value;
+
+            agendas = agendas
+                .Where(a =>
+                    ParseRids(a.MemberRids)
+                        .Any(rid =>
+                            members.Any(mm =>
+                                mm.MemberRid == rid &&
+                                mm.DepartmentId == nodalDeptId)))
+                .ToList();
+
+            members = members
+                .Where(mm => mm.DepartmentId == nodalDeptId)
+                .ToList();
+        }
+        else if (scopeOfficerRids is not null)
         {
             agendas = agendas
                 .Where(a =>

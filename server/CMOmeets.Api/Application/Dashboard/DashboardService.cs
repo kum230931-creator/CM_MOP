@@ -109,12 +109,30 @@ public class DashboardService
 
         // NEW: officer login + a specific department selected from the dropdown
         // -> keep only points where THIS officer's own involvement is in that department.
+        //if (scope?.IsOfficer == true &&
+        //    scope.OfficerLoginId is int off &&
+        //    scope.DeptFilter is int deptFilter)
+        //{
+        //    rows = rows
+        //        .Where(r => DeptForOfficer(r.DepartmentIDs, off) == deptFilter)
+        //        .ToList();
+        //}
         if (scope?.IsOfficer == true &&
-            scope.OfficerLoginId is int off &&
-            scope.DeptFilter is int deptFilter)
+    scope.OfficerLoginId is int off &&
+    scope.DeptFilter is int deptFilter)
         {
             rows = rows
                 .Where(r => DeptForOfficer(r.DepartmentIDs, off) == deptFilter)
+                .ToList();
+        }
+        
+        else if (scope?.IsNodal == true &&
+                 scope.DeptFilter is int nodalDept &&
+                 scopeRids is not null)
+        {
+            rows = rows
+                .Where(r => ParseRids(r.MemberRids)
+                    .Any(rid => scopeRids.Contains(rid) && DeptForOfficer(r.DepartmentIDs, rid) == nodalDept))
                 .ToList();
         }
 
